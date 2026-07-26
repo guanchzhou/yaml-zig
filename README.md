@@ -637,21 +637,24 @@ zig build bench
 ```
 
 The harness reports min/p50/p99/max latency and throughput across 100 samples
-with explicit warmup. On aarch64 (ReleaseFast), p50 lands at roughly:
+with explicit warmup. See `bench/main.zig`.
+
+On an Apple M1 Max (aarch64-macos), Zig 0.16.0, ReleaseFast -- p50
+latency, median of ten runs, cross-run spread below 8% per cell:
 
 | Benchmark | small (970 B) | medium (22 KB) | large (291 KB) |
 | --- | --- | --- | --- |
-| parse | 8.25 us, 112 MB/s | -- | 2.99 ms, 95 MB/s |
-| parseStream | 8.46 us, 109 MB/s | 176.7 us, 123 MB/s | 2.93 ms, 97 MB/s |
-| emit | 2.42 us, 383 MB/s | 48.3 us, 480 MB/s | 826 us, 373 MB/s |
+| parse | 12.4 us, 75 MB/s | -- | 3.68 ms, 77 MB/s |
+| parseStream | 12.2 us, 76 MB/s | 222 us, 98 MB/s | 3.69 ms, 77 MB/s |
+| emit | 2.88 us, 322 MB/s | 54.6 us, 424 MB/s | 1.03 ms, 298 MB/s |
 
 (`parse` requires a single document, so the multi-document medium fixture is
 measured only under `parseStream`. Emit throughput is against the bytes
 produced, which differs slightly from the input.) The scalar scan uses a
 16-wide SIMD (`@Vector(16, u8)`) fast-path to bulk-skip runs of non-terminator
 bytes in plain and quoted scalars, falling back to the per-byte loop at each
-candidate stop byte; the win scales with scalar length (e.g. long double-quoted
-content scans roughly 2x faster). The fixtures are a config-like document (small),
+candidate stop byte; the win scales with scalar length, largest on long
+double-quoted content. The fixtures are a config-like document (small),
 a multi-document manifest (medium), and a large record collection (large);
 see `bench/fixtures/`. Run `zig build bench` to get numbers for your machine.
 
