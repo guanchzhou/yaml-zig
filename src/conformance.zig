@@ -143,9 +143,12 @@ const policy = [_]PolicyEntry{
     //    (`{foo\n: bar}`), entangled with comma-omission and flow-in-block
     //    indentation rules the scanner does not separate (4MUZ-02, NJ66,
     //    VJP3-01).
-    .{ .id = "CT4Q", .reason = .flow_edge },                .{ .id = "4FJ6", .reason = .flow_edge },
-    .{ .id = "4MUZ-02", .reason = .flow_edge },             .{ .id = "9MMW", .reason = .flow_edge },
-    .{ .id = "NJ66", .reason = .flow_edge },                .{ .id = "VJP3-01", .reason = .flow_edge },
+    .{ .id = "CT4Q", .reason = .flow_edge },
+    .{ .id = "4FJ6", .reason = .flow_edge },
+    .{ .id = "4MUZ-02", .reason = .flow_edge },
+    .{ .id = "9MMW", .reason = .flow_edge },
+    .{ .id = "NJ66", .reason = .flow_edge },
+    .{ .id = "VJP3-01", .reason = .flow_edge },
 
     // comment_whitespace (1): UT92 is the sole remaining comment/whitespace
     // case the scanner does not handle identically to the suite reference.
@@ -161,11 +164,18 @@ const policy = [_]PolicyEntry{
     // block collections on the --- line) are now enforced; what remains needs
     // deeper context (flow-scalar/property/indentation analysis) than is worth
     // a fragile check.
-    .{ .id = "4JVG", .reason = .accepted_invalid },         .{ .id = "5U3A", .reason = .accepted_invalid },
-    .{ .id = "9C9N", .reason = .accepted_invalid },         .{ .id = "CML9", .reason = .accepted_invalid },
-    .{ .id = "DK95-01", .reason = .accepted_invalid },      .{ .id = "N782", .reason = .accepted_invalid },
-    .{ .id = "QB6E", .reason = .accepted_invalid },         .{ .id = "SY6V", .reason = .accepted_invalid },        .{ .id = "U99R", .reason = .accepted_invalid },
-    .{ .id = "Y79Y-00", .reason = .accepted_invalid },      .{ .id = "Y79Y-03", .reason = .accepted_invalid },     .{ .id = "ZXT5", .reason = .accepted_invalid },
+    .{ .id = "4JVG", .reason = .accepted_invalid },
+    .{ .id = "5U3A", .reason = .accepted_invalid },
+    .{ .id = "9C9N", .reason = .accepted_invalid },
+    .{ .id = "CML9", .reason = .accepted_invalid },
+    .{ .id = "DK95-01", .reason = .accepted_invalid },
+    .{ .id = "N782", .reason = .accepted_invalid },
+    .{ .id = "QB6E", .reason = .accepted_invalid },
+    .{ .id = "SY6V", .reason = .accepted_invalid },
+    .{ .id = "U99R", .reason = .accepted_invalid },
+    .{ .id = "Y79Y-00", .reason = .accepted_invalid },
+    .{ .id = "Y79Y-03", .reason = .accepted_invalid },
+    .{ .id = "ZXT5", .reason = .accepted_invalid },
 };
 
 fn policyReason(id: []const u8) ?Reason {

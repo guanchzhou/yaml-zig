@@ -551,7 +551,10 @@ pub const Composer = struct {
     fn applyMergeKeys(self: *Composer, span: Span, raw: []MappingEntry) Error![]Entry {
         var has_merge = false;
         for (raw) |me| {
-            if (me.is_merge) { has_merge = true; break; }
+            if (me.is_merge) {
+                has_merge = true;
+                break;
+            }
         }
         if (!has_merge) {
             const out = try self.arena.alloc(Entry, raw.len);

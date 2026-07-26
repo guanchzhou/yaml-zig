@@ -2271,14 +2271,14 @@ test "block sequence at the mapping key's indent opens a sequence" {
     var buf: [40]TokenKind = undefined;
     const n = try kinds("one:\n- a\n- b\ntwo: 2\n", &buf);
     try std.testing.expectEqualSlices(TokenKind, &.{
-        .stream_start,        .block_mapping_start,
-        .key,                 .scalar,
-        .value,               .block_sequence_start,
-        .block_entry,         .scalar,
-        .block_entry,         .scalar,
-        .block_end,           .key,
-        .scalar,              .value,
-        .scalar,              .block_end,
+        .stream_start, .block_mapping_start,
+        .key,          .scalar,
+        .value,        .block_sequence_start,
+        .block_entry,  .scalar,
+        .block_entry,  .scalar,
+        .block_end,    .key,
+        .scalar,       .value,
+        .scalar,       .block_end,
         .stream_end,
     }, buf[0..n]);
 }
@@ -2364,21 +2364,21 @@ test "explicit ? key in flow emits a single key, not a doubled one" {
     var buf: [24]TokenKind = undefined;
     var n = try kinds("{? a : b}", &buf);
     try std.testing.expectEqualSlices(TokenKind, &.{
-        .stream_start,        .flow_mapping_start,
-        .key,                 .scalar,
-        .value,               .scalar,
-        .flow_mapping_end,    .stream_end,
+        .stream_start,     .flow_mapping_start,
+        .key,              .scalar,
+        .value,            .scalar,
+        .flow_mapping_end, .stream_end,
     }, buf[0..n]);
 
     // Two explicit keys: each `?` arms suppression independently.
     n = try kinds("{? a: b, ? c: d}", &buf);
     try std.testing.expectEqualSlices(TokenKind, &.{
-        .stream_start,        .flow_mapping_start,
-        .key,                 .scalar,
-        .value,               .scalar,
-        .flow_entry,          .key,
-        .scalar,              .value,
-        .scalar,              .flow_mapping_end,
+        .stream_start, .flow_mapping_start,
+        .key,          .scalar,
+        .value,        .scalar,
+        .flow_entry,   .key,
+        .scalar,       .value,
+        .scalar,       .flow_mapping_end,
         .stream_end,
     }, buf[0..n]);
 }
@@ -2402,12 +2402,12 @@ test "flow sequence as a block mapping key splices block_mapping_start and key" 
     var buf: [32]TokenKind = undefined;
     const n = try kinds("[a, b]: value\n", &buf);
     try std.testing.expectEqualSlices(TokenKind, &.{
-        .stream_start,        .block_mapping_start,
-        .key,                 .flow_sequence_start,
-        .scalar,              .flow_entry,
-        .scalar,              .flow_sequence_end,
-        .value,               .scalar,
-        .block_end,           .stream_end,
+        .stream_start, .block_mapping_start,
+        .key,          .flow_sequence_start,
+        .scalar,       .flow_entry,
+        .scalar,       .flow_sequence_end,
+        .value,        .scalar,
+        .block_end,    .stream_end,
     }, buf[0..n]);
 }
 
@@ -2415,12 +2415,12 @@ test "flow mapping as a block mapping key splices block_mapping_start and key" {
     var buf: [32]TokenKind = undefined;
     const n = try kinds("{a: 1}: value\n", &buf);
     try std.testing.expectEqualSlices(TokenKind, &.{
-        .stream_start,        .block_mapping_start,
-        .key,                 .flow_mapping_start,
-        .key,                 .scalar,
-        .value,               .scalar,
-        .flow_mapping_end,    .value,
-        .scalar,              .block_end,
+        .stream_start,     .block_mapping_start,
+        .key,              .flow_mapping_start,
+        .key,              .scalar,
+        .value,            .scalar,
+        .flow_mapping_end, .value,
+        .scalar,           .block_end,
         .stream_end,
     }, buf[0..n]);
 }
@@ -2441,9 +2441,9 @@ test "flow value (no following colon) is unchanged by the candidate path" {
     // A bare top-level flow node is likewise untouched.
     const m = try kinds("[1, 2]\n", &buf);
     try std.testing.expectEqualSlices(TokenKind, &.{
-        .stream_start,       .flow_sequence_start,
-        .scalar,             .flow_entry,
-        .scalar,             .flow_sequence_end,
+        .stream_start, .flow_sequence_start,
+        .scalar,       .flow_entry,
+        .scalar,       .flow_sequence_end,
         .stream_end,
     }, buf[0..m]);
 }
@@ -2479,7 +2479,6 @@ test "flow-as-key candidate buffering terminates within the bound" {
     try drainBoundedScan("[a, b\n", cap);
     try drainBoundedScan("[a, b", cap);
 }
-
 
 test "flow node glued to inline key/value framing terminates within the bound" {
     // `a: {}b: 1` rejects the glued `b:` as a nested inline block mapping. The

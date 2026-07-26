@@ -883,8 +883,7 @@ test "decode: yaml_flatten unknown-field check expands flattened keys" {
     };
     var ar = ArenaAllocator.init(testing.allocator);
     defer ar.deinit();
-    try testing.expectError(error.UnknownField, parseInto(Outer, ar.allocator(),
-        "name: foo\nx: 42\nunexpected: true\n", .{}));
+    try testing.expectError(error.UnknownField, parseInto(Outer, ar.allocator(), "name: foo\nx: 42\nunexpected: true\n", .{}));
 }
 
 test "decode: tagged union missing discriminator -> MissingField" {
@@ -904,8 +903,7 @@ test "decode: tagged union unknown discriminator -> InvalidEnumValue" {
     };
     var ar = ArenaAllocator.init(testing.allocator);
     defer ar.deinit();
-    try testing.expectError(error.InvalidEnumValue, parseInto(Plugin, ar.allocator(),
-        "kind: xyz\nhost: localhost\n", .{}));
+    try testing.expectError(error.InvalidEnumValue, parseInto(Plugin, ar.allocator(), "kind: xyz\nhost: localhost\n", .{}));
 }
 
 test "decode: tagged union unknown variant diagnostic suggests closest match" {
@@ -1104,7 +1102,6 @@ test "decodeArray: non-empty seq into zero-length array is TypeMismatch" {
     defer ar.deinit();
     try testing.expectError(error.TypeMismatch, parseInto(C, ar.allocator(), "a: [1]\n", .{}));
 }
-
 
 // Streaming typed decode (no Value tree)
 
@@ -1450,7 +1447,6 @@ fn skipNode(p: *parser_mod.Parser, cook: *composer.Composer, ev: Event, depth: u
     }
 }
 
-
 /// Allocator wrapper that counts bytes handed out. Used to bound the
 /// allocation cost of the streaming typed decode path.
 const CountingAllocator = struct {
@@ -1506,9 +1502,7 @@ test "parseInto streams: allocation bounded, no Value tree materialized" {
     defer src.deinit(testing.allocator);
     var i: usize = 0;
     while (i < 2000) : (i += 1) {
-        try src.print(testing.allocator,
-            "- id: {d}\n  name: record-{d}\n  active: {}\n  score: {d}.5\n  tags: [a, b]\n",
-            .{ i, i, i % 2 == 0, i % 100 });
+        try src.print(testing.allocator, "- id: {d}\n  name: record-{d}\n  active: {}\n  score: {d}.5\n  tags: [a, b]\n", .{ i, i, i % 2 == 0, i % 100 });
     }
 
     var ar = ArenaAllocator.init(testing.allocator);
@@ -1674,6 +1668,5 @@ test "streaming: merge key inside skipped unknown subtree errors like the tree" 
     const T = struct { name: []const u8 };
     var ar = ArenaAllocator.init(testing.allocator);
     defer ar.deinit();
-    try testing.expectError(error.YamlParseError, parseInto(T, ar.allocator(),
-        "name: x\njunk:\n  <<:\n  host: h\n", .{ .ignore_unknown_fields = true }));
+    try testing.expectError(error.YamlParseError, parseInto(T, ar.allocator(), "name: x\njunk:\n  <<:\n  host: h\n", .{ .ignore_unknown_fields = true }));
 }
