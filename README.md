@@ -64,7 +64,7 @@ const cfg = try yaml.parseInto(Config, arena, src, .{});
 
 ## Install
 
-Requires Zig 0.16.0 or newer.
+Requires Zig 0.16; see [Compatibility](#compatibility).
 
 ```sh
 zig fetch --save git+https://github.com/sakakibara/yaml-zig
@@ -79,6 +79,16 @@ const yaml = b.dependency("yaml", .{
 });
 exe.root_module.addImport("yaml", yaml.module("yaml"));
 ```
+
+## Compatibility
+
+- **Zig:** 0.16 (`minimum_zig_version = 0.16.0`). Port to Zig 0.17:
+  approved 2026-10-18, due 2026-11-17. It ships as 0.6.0; 0.5.x then stays
+  on a `zig-0.16` branch, with the dates listed here.
+- **Versioning:** semantic versioning. Before 1.0, a minor release (0.y.0)
+  may break and a patch (0.y.z) never does. Breaking changes are listed
+  under "Breaking" in the [CHANGELOG](CHANGELOG.md), and their commits are
+  marked with `!` in the subject.
 
 ## Quickstart
 
