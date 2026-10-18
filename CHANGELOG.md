@@ -6,13 +6,25 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.5.0] - 2026-10-18
 
-Output changes: the emitter quotes more strings than before (`yes`, `y`,
-`0.0.0.0`, `1st`, a key named `y`), escapes characters it used to write
-raw, and writes very long keys as explicit keys, so byte-compared emitted
-YAML differs. `Schema` and `InvalidReason` gain members and `EmitError` an
-error, so an exhaustive `switch` over any of them needs new arms. The parser
-refuses input that is not valid UTF-8, and the scanner hands out an
-`.invalid` token before the token that holds such a byte.
+### Breaking
+
+- Emitted YAML changes: strings a YAML 1.1 reader would read as another
+  type are quoted (`yes`, `y`, `0123`, `1st`), characters YAML does not
+  allow raw are escaped, keys over 1024 characters are written as `? key`,
+  and scientific floats carry a dot and signed exponent (`1e21` ->
+  `1.0e+21`). Output compared byte for byte: regenerate expected output.
+- `Schema` has a new member `.yaml11`: an exhaustive `switch` on `Schema`
+  needs a `.yaml11` arm.
+- `InvalidReason` has new members `.invalid_utf8` and `.truncated_utf8`: an
+  exhaustive `switch` on a token's `invalid_reason` needs both arms.
+- `EmitError` has a new error `InvalidUtf8`: emitting a string that is not
+  valid UTF-8 fails instead of writing its bytes; handle the error, or
+  validate strings before emitting.
+- Input that is not valid UTF-8 fails to parse with `error.YamlParseError`:
+  validate or transcode input before parsing.
+- `Document.setLiteral` inside a flow collection refuses a literal that
+  spans lines, holds a comment, or adds members: use `set`, or edit the
+  collection in block style.
 
 ### Added
 
