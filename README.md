@@ -23,16 +23,16 @@ A YAML 1.2.2 parser, decoder, and emitter for Zig.
   re-resolve to the wrong type (`"true"` stays a string, not a bool).
 - **Lossless document model** - parse, edit, and emit byte-identical when
   unmodified and minimal-diff when edited; comments, formatting, anchors,
-  and quoting are preserved. Validated round-tripping all 309 parseable
+  and quoting are preserved. Validated round-tripping all 310 parseable
   yaml-test-suite cases byte-for-byte.
 - **Schema selection** - resolve plain scalars under the `failsafe`, `json`,
   `core` (default) or YAML 1.1 (`yaml11`) schema.
 - **Conformance, honestly measured** - validated against the
-  [yaml-test-suite](https://github.com/yaml/yaml-test-suite): 293 cases
+  [yaml-test-suite](https://github.com/yaml/yaml-test-suite): 294 cases
   match the reference event stream byte-for-byte, and of 94 error-marked
   cases 82 are correctly rejected (the other 12 are not yet rejected and are
-  policy-documented). 309 cases survive a parse -> emit -> parse round-trip.
-  In total 21 cases are explicitly policy-documented as known divergences
+  policy-documented). 310 cases survive a parse -> emit -> parse round-trip.
+  In total 20 cases are explicitly policy-documented as known divergences
   (see [Conformance](#conformance)). This passes the common real-world
   subset; full conformance is ongoing.
 - **Fast** - single-pass, arena-allocated, zero-copy scalars where possible,
@@ -597,9 +597,9 @@ vendored under `tests/corpus/yaml-test-suite/` alongside its upstream
 `LICENSE`. Of 405 corpus cases:
 
 ```
-event stream matches reference:   293 cases, byte-for-byte
+event stream matches reference:   294 cases, byte-for-byte
 error cases correctly rejected:    82 of 94 error-marked cases
-policy-documented divergences:     21 cases (incl. 12 not-yet-rejected errors)
+policy-documented divergences:     20 cases (incl. 12 not-yet-rejected errors)
 ```
 
 The primary check is the **event stream**: each input is parsed, its event
@@ -607,7 +607,7 @@ sequence serialized to the suite's `test.event` text format, and required to
 match byte-for-byte. Where the suite also ships an `in.json` projection, the
 composed `Value` is cross-checked against it.
 
-The 21 policy-documented cases are an explicit, pinned list in
+The 20 policy-documented cases are an explicit, pinned list in
 `src/conformance.zig`, each tagged with a reason. The remaining divergences
 cluster into two groups:
 
@@ -629,7 +629,7 @@ corpus drift -- a lost or newly-added case -- forces a conscious decision
 rather than silently inflating or deflating the pass count.
 
 Separately, the suite asserts emitter round-trip safety: every corpus case
-whose input composes cleanly (309 of them) survives parse -> emit -> parse
+whose input composes cleanly (310 of them) survives parse -> emit -> parse
 to a deeply-equal `Value` tree, with no skips.
 
 Reproduce with:

@@ -60,13 +60,6 @@ const expected_policy: usize = policy.len;
 /// Why a case is excluded from the expected-pass event check. Each variant
 /// documents a real divergence; cases are grouped by reason in the table.
 const Reason = enum {
-    /// Explicit `? key` / `: value` block mappings whose key or value is a
-    /// COMPACT collection at the indicator's own indent (a sequence not
-    /// indented past the `?`/`:`), or whose key carries node properties
-    /// (`&anchor c:`) that shift the entry column. The common explicit-key
-    /// forms (scalar, indented-collection key/value, mixed with implicit
-    /// entries, null value) are modeled and pass.
-    explicit_block_key,
     /// Flow-context edge cases not yet matched: a multi-token flow collection
     /// used as a KEY *inside* a flow collection (`[[a]: b]`), which would need
     /// the already-emitted key node wrapped retroactively in a single-pair,
@@ -124,11 +117,6 @@ const policy = [_]PolicyEntry{
 
     // other (1)
     .{ .id = "DK95-00", .reason = .other },
-
-    // explicit_block_key (1): node properties on an explicit key that shift the
-    // entry column (ZWK4). The common forms (scalar, indented-collection, null
-    // value, compact-collection) now pass.
-    .{ .id = "ZWK4", .reason = .explicit_block_key },
 
     // flow_edge (6). A block-context flow collection used as a block mapping
     // key (`[flow]: block`, `? []: x`) now promotes via the scanner's deferred
@@ -602,7 +590,7 @@ const roundtrip_skip = [_][]const u8{};
 /// Pinned round-trip counts so corpus drift forces a decision: `candidates`
 /// is the number of cases whose `in.yaml` composes into Values (and are not
 /// skip-listed); all of them must pass deep-equality round-trip.
-const expected_roundtrip_candidates: usize = 309;
+const expected_roundtrip_candidates: usize = 310;
 const expected_roundtrip_skip: usize = roundtrip_skip.len;
 
 fn roundtripSkipped(id: []const u8) bool {
@@ -726,7 +714,7 @@ const docident_skip = [_][]const u8{};
 /// of composer-accepted cases; all must be accepted by `Document.parse` and
 /// emit byte-identically. `skip` counts composer-accepted cases the document
 /// tree rejects.
-const expected_docident_candidates: usize = 309;
+const expected_docident_candidates: usize = 310;
 const expected_docident_skip: usize = docident_skip.len;
 
 fn docidentSkipped(id: []const u8) bool {

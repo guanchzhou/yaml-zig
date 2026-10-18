@@ -1526,8 +1526,9 @@ pub const Scanner = struct {
         } };
         if (kind == .anchor) {
             // An anchor is a node property; record its column so a key it
-            // precedes opens its block mapping at the anchor's column.
-            if (self.flow_level == 0 and self.prop_start_col == null) {
+            // precedes opens its block mapping at the anchor's column (the
+            // first property of the key's own line).
+            if (self.flow_level == 0 and (self.prop_start_col == null or self.prop_start_line != start_line)) {
                 self.prop_start_col = sigil_col;
                 self.prop_start_line = start_line;
             }
@@ -1583,8 +1584,10 @@ pub const Scanner = struct {
             return;
         }
         // A tag is a node property; record its column so a key it precedes
-        // opens its block mapping at the tag's column (`!!str a: b`).
-        if (self.flow_level == 0 and self.prop_start_col == null) {
+        // opens its block mapping at the tag's column (`!!str a: b`). The
+        // first property of the key's own line counts, not one trailing an
+        // earlier line (`k1: &a\n!!str k3: v`).
+        if (self.flow_level == 0 and (self.prop_start_col == null or self.prop_start_line != start_line)) {
             self.prop_start_col = sigil_col;
             self.prop_start_line = start_line;
         }

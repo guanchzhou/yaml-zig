@@ -1822,6 +1822,42 @@ test "a sequence the input ends inside is truncated only when some completion of
     }
 }
 
+test "an anchor on the line of the key after an empty value decorates that key" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    const v = try parse(a, "x:\n&a k: v\nm:\n  *a : 3\n", .{});
+    try std.testing.expect(v.get("x").? == .null);
+    try std.testing.expectEqual(@as(i64, 3), v.getT(i64, "m.k").?);
+    // On the value's own line it decorates the empty value.
+    const w = try parse(a, "x: &a\nk: v\nm: *a\n", .{});
+    try std.testing.expect(w.get("m").? == .null);
+}
+
+test "properties on a key's own line after an empty value with properties decorate that key" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    // Each reads as two sibling keys, the first with an empty value, as
+    // PyYAML and YAML read them; not as a nested mapping.
+    for ([_][]const u8{
+        "k1: &a2\n!!str k3: v\n",
+        "k1: &a2\n&b k3: v\n",
+        "k1: &a2\n# c\n!!str k3: v\n",
+        "? k1\n: &a2\n&a4 k3: v\n",
+        "? k1\n!!str k3: v\n",
+        "? k1\n&a k3: v\n",
+    }) |src| {
+        const v = try parse(a, src, .{});
+        try std.testing.expect(v.get("k1").? == .null);
+        try std.testing.expectEqualStrings("v", v.getT([]const u8, "k3").?);
+    }
+    // An earlier-line tag stays with the empty value: `!!str` makes it "".
+    const t = try parse(a, "k1: !!str\n&b k3: v\n", .{});
+    try std.testing.expectEqualStrings("", t.getT([]const u8, "k1").?);
+    try std.testing.expectEqualStrings("v", t.getT([]const u8, "k3").?);
+}
+
 test "the scanner ends its token stream with stream_end after a byte that is not UTF-8" {
     var sc = scanner.Scanner.init("a: \xff\n");
     var saw_invalid = false;

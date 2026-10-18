@@ -828,8 +828,16 @@ pub const Parser = struct {
                     return ev;
                 }
                 self.popState();
-                const raw = self.pending_span orelse RawSpan{ .start = t.span.start, .end = t.span.start, .line = t.span.line, .col = t.span.col };
-                return self.emptyScalar(raw);
+                const at = RawSpan{ .start = t.span.start, .end = t.span.start, .line = t.span.line, .col = t.span.col };
+                // Properties on the next key's own line decorate that key
+                // (`x:\n&a k: v`); the empty value before it keeps only those
+                // from an earlier line (`x: !!str\n&a k: v`).
+                if (self.pending_span) |ps| if (ps.line == t.span.line) {
+                    var ev: Event = .{ .kind = .scalar, .span = toSpan(at), .scalar_style = .plain, .value = "" };
+                    self.applyCarried(&ev);
+                    return ev;
+                };
+                return self.emptyScalar(self.pending_span orelse at);
             },
             .invalid => return self.failInvalid(t),
             else => {
@@ -904,10 +912,13 @@ pub const Parser = struct {
                 return null;
             },
             // A key with no `value` indicator: the value is empty. Emit an
-            // empty scalar and cycle back to expecting a key.
-            .key, .block_end => {
+            // empty scalar and cycle back to expecting a key. A property
+            // here starts the next entry's key (`? a\n&x b: c`), since a
+            // value needs its `:` first; it is left for that key.
+            .key, .block_end, .anchor, .tag => {
                 self.setTop(.block_mapping_key);
-                return self.emptyScalar(.{ .start = t.span.start, .end = t.span.start, .line = t.span.line, .col = t.span.col });
+                const at: RawSpan = .{ .start = t.span.start, .end = t.span.start, .line = t.span.line, .col = t.span.col };
+                return Event{ .kind = .scalar, .span = toSpan(at), .scalar_style = .plain, .value = "" };
             },
             .invalid => return self.failInvalid(t),
             else => return self.fail("mapping values are not allowed here"),
