@@ -39,9 +39,19 @@ pub const Span = value.Span;
 pub const Spans = value.Spans;
 
 /// Scalar resolution schema: `failsafe` (all strings), `json` (the JSON
-/// data model), or `core` (YAML 1.2.2 Core, the usual default). Selects
-/// how a plain scalar's text is decoded into a typed `Value`.
+/// data model), `core` (YAML 1.2.2 Core, the usual default), or `yaml11`
+/// (the YAML 1.1 types). Selects how a plain scalar's text is decoded into
+/// a typed `Value`.
 pub const Schema = schema.Schema;
+
+/// The type a schema's grammar gives a plain scalar; see `tagOf`.
+pub const Tag = schema.Tag;
+
+/// The type `schema`'s grammar gives the plain scalar `plain`, including
+/// types the `Value` model has no variant for (a YAML 1.1 timestamp, merge
+/// or value key). When it is `.str`, the scalar written plain reads back as
+/// that string under `schema`.
+pub const tagOf = schema.tagOf;
 
 /// Indentation-aware streaming tokenizer over block-context YAML. Emits a
 /// flat token stream with explicit block-collection structure; see

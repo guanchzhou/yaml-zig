@@ -694,10 +694,12 @@ pub const Composer = struct {
         };
     }
 
-    /// Resolve a scalar under an explicit core type tag, erroring if the
-    /// content does not match that type's predicate.
+    /// Resolve a scalar under an explicit type tag, erroring if the content
+    /// does not match that type's predicate: the YAML 1.1 types under the
+    /// `yaml11` schema, else the core types (an explicit tag is honored even
+    /// under `failsafe` and `json`).
     fn resolveTyped(self: *Composer, want: Typed, content: []const u8) Error!Value {
-        const v = try schema.resolve(.core, self.arena, content);
+        const v = try schema.resolve(if (self.options.schema == .yaml11) .yaml11 else .core, self.arena, content);
         const ok = switch (want) {
             .int => v == .int,
             .float => v == .float,
@@ -1292,6 +1294,19 @@ test "compose scalars with core schema" {
     try std.testing.expectEqual(true, v.getT(bool, "b").?);
     try std.testing.expect(v.get("z").? == .null);
     try std.testing.expectEqualStrings("hi", v.getT([]const u8, "s").?);
+}
+
+test "compose scalars with the yaml11 schema, explicit tags included" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    const src = "a: on\nb: !!int 0b101\nc: 2001-12-14\nd: 1:30\n";
+    const v = try parse(a, src, .{ .schema = .yaml11 });
+    try std.testing.expectEqual(true, v.getT(bool, "a").?);
+    try std.testing.expectEqual(@as(i64, 5), v.getT(i64, "b").?);
+    try std.testing.expectEqualStrings("2001-12-14", v.getT([]const u8, "c").?);
+    try std.testing.expectEqual(@as(i64, 90), v.getT(i64, "d").?);
+    try std.testing.expectError(error.YamlParseError, parse(a, src, .{ .schema = .core }));
 }
 
 test "explicit ? key in a flow collection is not double-scanned" {
@@ -1915,6 +1930,40 @@ test "merge key merges mappings with override precedence" {
 // Bounds merge-key resolution at O(N): a quadratic rescan of the growing
 // output would take tens of seconds for this size, so the wall-clock guard
 // fails loudly on a regression instead of merely running slow.
+test "a whole number of any length resolves in time linear in its length" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    const n: usize = 400_000;
+    const cases = [_]struct { prefix: []const u8, digit: u8, schema: Schema }{
+        .{ .prefix = "a: ", .digit = '7', .schema = .core },
+        .{ .prefix = "a: 0x", .digit = 'f', .schema = .core },
+        .{ .prefix = "a: 0o", .digit = '7', .schema = .core },
+        .{ .prefix = "a: 0b", .digit = '1', .schema = .yaml11 },
+        .{ .prefix = "a: -1", .digit = '0', .schema = .yaml11 },
+    };
+    const start = std.Io.Timestamp.now(std.testing.io, .awake);
+    for (cases) |c| {
+        const src = try a.alloc(u8, c.prefix.len + n + 1);
+        @memcpy(src[0..c.prefix.len], c.prefix);
+        @memset(src[c.prefix.len .. src.len - 1], c.digit);
+        src[src.len - 1] = '\n';
+        const v = try parse(a, src, .{ .schema = c.schema });
+        try std.testing.expect(std.math.isInf(v.getT(f64, "a").?));
+    }
+    // Sexagesimal: one group per pair of digits.
+    var sex: std.ArrayList(u8) = .empty;
+    try sex.appendSlice(a, "a: 1");
+    for (0..n / 3) |_| try sex.appendSlice(a, ":59");
+    try sex.append(a, '\n');
+    const v = try parse(a, sex.items, .{ .schema = .yaml11 });
+    try std.testing.expect(std.math.isInf(v.getT(f64, "a").?));
+    const elapsed_ns = start.durationTo(std.Io.Timestamp.now(std.testing.io, .awake)).nanoseconds;
+    try std.testing.expect(elapsed_ns < 5 * std.time.ns_per_s);
+    // Below the range limit the exact value still comes through.
+    try std.testing.expectEqual(@as(f64, 0x1p1000), (try parse(a, "a: 0b1" ++ "0" ** 1000 ++ "\n", .{ .schema = .yaml11 })).getT(f64, "a").?);
+}
+
 test "merge of a large map is linear, not quadratic" {
     var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer ar.deinit();

@@ -26,7 +26,7 @@ A YAML 1.2.2 parser, decoder, and emitter for Zig.
   and quoting are preserved. Validated round-tripping all 309 parseable
   yaml-test-suite cases byte-for-byte.
 - **Schema selection** - resolve plain scalars under the `failsafe`, `json`,
-  or `core` (default) schema.
+  `core` (default) or YAML 1.1 (`yaml11`) schema.
 - **Conformance, honestly measured** - validated against the
   [yaml-test-suite](https://github.com/yaml/yaml-test-suite): 293 cases
   match the reference event stream byte-for-byte, and of 94 error-marked
@@ -451,7 +451,8 @@ do not use the entries after the parse arena is gone.
 ### Schema selection
 
 A plain (untagged) scalar's text is resolved to a typed `Value` under the
-chosen schema. The three form a ladder of strictness:
+chosen schema. The three YAML 1.2 schemas form a ladder of strictness, and
+`yaml11` reads the YAML 1.1 types:
 
 ```zig
 // failsafe: every scalar stays a string.
@@ -460,11 +461,19 @@ const a1 = try yaml.parse(arena, "value: yes", .{ .schema = .failsafe });
 const a2 = try yaml.parse(arena, "value: 10", .{ .schema = .json });
 // core (default): JSON plus YAML conveniences (~, hex/octal, .inf/.nan).
 const a3 = try yaml.parse(arena, "value: 0x10", .{ .schema = .core });
+// yaml11: yes/no/on/off/y/n, base 2/8/16/60 integers with `_`, 1.1 floats.
+const a4 = try yaml.parse(arena, "value: on", .{ .schema = .yaml11 });
 ```
+
+A YAML 1.1 timestamp, merge key (`<<`) or value key (`=`) has no `Value`
+variant and resolves to its text; so does a 1.1 float spelling that names
+no number (`1.2.3`, which the 1.1 grammar admits). `yaml.tagOf(schema,
+text)` names the type a schema's grammar gives a plain scalar, these
+included.
 
 A `!!str`-tagged scalar always stays a string regardless of schema;
 `!!int` / `!!float` / `!!bool` / `!!null` resolve via the schema predicate
-and error on mismatch.
+(the 1.1 types under `yaml11`, else the core types) and error on mismatch.
 
 ### Merge keys
 
@@ -518,6 +527,7 @@ mapping's keys; keys already present in the local mapping win. Set
 | `emitStream(w, values, options)` | Emit a slice of documents, `---`-separated. |
 | `emitTyped(w, value, arena, options)` | Emit a typed value, honoring annotations and hooks. |
 | `cookScalarText(arena, src, event)` | Cook a scalar event to its presentation text. |
+| `tagOf(schema, plain)` | Name the type a schema's grammar gives a plain scalar. |
 
 #### Streaming (reader-backed, document-at-a-time)
 
@@ -550,7 +560,7 @@ mapping's keys; keys already present in the local mapping win. Set
 
 ### Types
 
-`Value`, `Entry`, `Span`, `Spans`, `Schema`, `Scanner`, `Token`,
+`Value`, `Entry`, `Span`, `Spans`, `Schema`, `Tag`, `Scanner`, `Token`,
 `TokenKind`, `ScalarStyle`, `Parser`, `Event`, `EventKind`, `ParseOptions`,
 `EmitOptions`, `Diagnostic`, `Error`, `ReaderError`, `DecodeError`,
 `EmitError`, `Document`, `DocumentError`, `EventReader`, `ValueStream`,
