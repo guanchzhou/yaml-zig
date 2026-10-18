@@ -822,6 +822,7 @@ test "streaming events match buffered parser over the same bytes" {
 
 const chunk_cases = [_][]const u8{
     "---\na: 1\n---\nb: 2\n---\nc: 3\n",
+    "a: caf\u{e9}\n---\nb: \u{1F600} \u{2028}\n---\n\u{3042}: x\n",
     "block: |\n  line one\n  line two\n  line three\n---\nnext: doc\n",
     "folded: >\n  a folded\n  scalar here\n---\nx: y\n",
     "s: \"a string\nspanning lines\"\n---\nt: u\n",
@@ -1765,4 +1766,42 @@ test "ValueStream: oversized boundary-free document fails fast with DocumentTooL
     var item_arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer item_arena.deinit();
     try testing.expectError(error.DocumentTooLarge, vs.next(item_arena.allocator()));
+}
+
+test "a byte that is not UTF-8 early in a long stream is reported, not buffered past the document cap" {
+    const gpa = testing.allocator;
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(gpa);
+    try src.appendSlice(gpa, "a: \xff\n");
+    for (0..2000) |i| try src.print(gpa, "---\nk{d}: v\n", .{i});
+    var r: std.Io.Reader = .fixed(src.items);
+    var vs = ValueStream.fromReader(gpa, &r, .{ .max_document_bytes = 4096 });
+    defer vs.deinit();
+    var item_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer item_arena.deinit();
+    try testing.expectError(error.YamlParseError, vs.next(item_arena.allocator()));
+}
+
+test "a multi-byte character split across a reader pull frames like the buffered parse" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // The reader pulls 4096 bytes at a time: put each character width across
+    // that boundary at every offset.
+    for ([_][]const u8{ "\u{e9}", "\u{3042}", "\u{1F600}" }) |ch| {
+        for (0..ch.len) |shift| {
+            var src: std.ArrayList(u8) = .empty;
+            try src.appendSlice(a, "a: ");
+            try src.appendNTimes(a, 'x', 4096 - 3 - shift);
+            try src.appendSlice(a, ch);
+            try src.appendSlice(a, "\n---\nb: 2\n");
+            const want = try drainBuffered(a, src.items);
+            var r: std.Io.Reader = .fixed(src.items);
+            var er = EventReader.fromReader(a, &r, .{});
+            defer er.deinit();
+            var got: std.ArrayList(EvSnapshot) = .empty;
+            while (try er.next()) |ev| try got.append(a, try snapshot(a, ev));
+            try expectSnapshotsEqual(want, got.items);
+        }
+    }
 }

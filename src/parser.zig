@@ -291,6 +291,8 @@ pub const Parser = struct {
             .multiline_implicit_key => "implicit mapping key spans multiple lines",
             .nested_block_mapping_inline => "block mapping key not allowed mid-line after a value",
             .bare_indicator_in_flow => "'-' or '?' indicator not allowed before a flow indicator",
+            .invalid_utf8 => "input is not valid UTF-8",
+            .truncated_utf8 => "input ends inside a UTF-8 sequence",
             .none => "invalid token",
         };
         return self.failAt(t.span, msg);

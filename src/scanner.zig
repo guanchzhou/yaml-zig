@@ -104,6 +104,11 @@ pub const InvalidReason = enum {
     /// A bare block indicator (`-`/`?`) glued to a flow indicator inside a flow
     /// collection (`[-]`, `[?]`): it cannot begin a plain scalar there.
     bare_indicator_in_flow,
+    /// The input is not valid UTF-8 here: a YAML stream is Unicode text.
+    invalid_utf8,
+    /// The input ends inside a multi-byte UTF-8 sequence. A streaming
+    /// reader's buffer can end this way before the rest arrives.
+    truncated_utf8,
 };
 
 /// Chomping mode for a block scalar (`|`/`>`), parsed from the header
@@ -213,6 +218,19 @@ pub const Scanner = struct {
     stream_start_emitted: bool = false,
     stream_end_emitted: bool = false,
     overflowed: bool = false,
+    /// `input` is checked as UTF-8 up to here, as tokens are handed out.
+    utf8_checked: usize = 0,
+    /// The next byte not part of valid UTF-8 found by that check, and
+    /// whether it starts a sequence the input ends inside of. An `.invalid`
+    /// token is handed out there, before the token that reaches it; the
+    /// scan then goes on, so recovery resumes as after any other error.
+    bad_utf8: ?usize = null,
+    bad_utf8_truncated: bool = false,
+    /// Line counting for the spans of those tokens, carried forward from the
+    /// last one so every bad byte costs only the bytes since it.
+    utf8_line_at: usize = 0,
+    utf8_line: u32 = 1,
+    utf8_line_start: usize = 0,
 
     /// Opt-in lossless mode: when set, `skipToToken` records each `#`
     /// comment it would otherwise discard, and the fetch paths surface them
@@ -278,6 +296,7 @@ pub const Scanner = struct {
         // Advancing pos by 3 leaves col at 0 so document-start markers and
         // indentation rules are unaffected.
         if (std.mem.startsWith(u8, s.input, "\xEF\xBB\xBF")) s.pos = 3;
+        s.utf8_checked = s.pos;
         // Stream-level sentinel: real content always indents past -1.
         s.indents[0] = -1;
         s.indents_len = 1;
@@ -366,6 +385,10 @@ pub const Scanner = struct {
         var pending_end: ?usize = null;
         var pending_end_line: u32 = 0;
         while (s.nextRaw()) |t| {
+            // A byte that is not UTF-8 changes no boundary: its `.invalid`
+            // token precedes the token that holds it, which still frames, and
+            // the parse of the document reports it.
+            if (t.kind == .invalid and t.invalid_reason == .invalid_utf8) continue;
             if (pending_end) |end_off| {
                 if (t.span.line == pending_end_line and isFramingContent(t.kind)) {
                     pending_end = null;
@@ -408,10 +431,11 @@ pub const Scanner = struct {
                     return .need_more;
                 },
                 .invalid => {
-                    // Reachable here only at raw end of buffer: an unterminated
-                    // quoted scalar (cut mid-token). More bytes may terminate it
-                    // and change framing, so pull more; at reader EOF the caller
-                    // hands the buffer to the parser to surface the real error.
+                    // Reachable here only at raw end of buffer: an
+                    // unterminated quoted scalar, or a UTF-8 sequence, cut
+                    // mid-token. More bytes may terminate it and change
+                    // framing, so pull more; at reader EOF the caller hands the
+                    // buffer to the parser to surface the real error.
                     return .need_more;
                 },
                 else => entered = true,
@@ -440,6 +464,14 @@ pub const Scanner = struct {
             self.fetchMore();
         }
         const t = self.queue[self.queue_head];
+        self.checkUtf8(@max(t.span.end, @min(t.span.start + 1, self.input.len)));
+        if (self.bad_utf8) |bad| if (t.span.end > bad or t.span.start >= bad) {
+            self.bad_utf8 = null;
+            // One `.invalid` token per token: the rest of this token is not
+            // checked again, so a run of bad bytes costs one token each way.
+            self.utf8_checked = @max(self.utf8_checked, t.span.end);
+            return .{ .kind = .invalid, .span = self.spanAt(bad), .invalid_reason = if (self.bad_utf8_truncated) .truncated_utf8 else .invalid_utf8 };
+        };
         self.queue_head = (self.queue_head + 1) % queue_cap;
         self.queue_len -= 1;
         return t;
@@ -472,6 +504,59 @@ pub const Scanner = struct {
         const at = (self.queue_head + idx) % queue_cap;
         self.queue[at] = t;
         self.queue_len += 1;
+    }
+
+    /// Check `input` as UTF-8 up to `upto` (or to the end of a sequence that
+    /// starts before it), stopping at the next bad byte. The check goes on
+    /// past that byte once its token has been handed out.
+    fn checkUtf8(self: *Scanner, upto: usize) void {
+        while (self.bad_utf8 == null and self.utf8_checked < upto) {
+            const i = self.utf8_checked;
+            const lead = self.input[i];
+            if (lead < 0x80) {
+                self.utf8_checked += 1;
+                continue;
+            }
+            const n = std.unicode.utf8ByteSequenceLength(lead) catch return self.badUtf8(i, false);
+            if (i + n > self.input.len) return self.badUtf8(i, completable(self.input[i..]));
+            _ = std.unicode.utf8Decode(self.input[i .. i + n]) catch return self.badUtf8(i, false);
+            self.utf8_checked = i + n;
+        }
+    }
+
+    /// Whether some bytes appended to `prefix`, the start of a multi-byte
+    /// sequence, make it valid UTF-8.
+    fn completable(prefix: []const u8) bool {
+        const n = std.unicode.utf8ByteSequenceLength(prefix[0]) catch return false;
+        for ([_]u8{ 0x80, 0xBF }) |fill| {
+            var buf: [4]u8 = @splat(fill);
+            @memcpy(buf[0..prefix.len], prefix);
+            if (std.unicode.utf8Decode(buf[0..n])) |_| return true else |_| {}
+        }
+        return false;
+    }
+
+    fn badUtf8(self: *Scanner, at: usize, truncated: bool) void {
+        self.bad_utf8 = at;
+        self.bad_utf8_truncated = truncated;
+        self.utf8_checked = if (truncated) self.input.len else at + 1;
+    }
+
+    /// A zero-width span at byte `at`, its line and column counted as
+    /// `advance` counts them, from where the last one was counted (`at` only
+    /// grows).
+    fn spanAt(self: *Scanner, at: usize) RawSpan {
+        const input = self.input;
+        var i = self.utf8_line_at;
+        while (i < at) : (i += 1) {
+            const c = input[i];
+            if (c == '\n' or (c == '\r' and (i + 1 >= input.len or input[i + 1] != '\n'))) {
+                self.utf8_line = satAdd(self.utf8_line, 1);
+                self.utf8_line_start = i + 1;
+            }
+        }
+        self.utf8_line_at = at;
+        return .{ .start = at, .end = at, .line = self.utf8_line, .col = @intCast(@min(at - self.utf8_line_start + 1, std.math.maxInt(u32))) };
     }
 
     fn point(self: *Scanner) RawSpan {

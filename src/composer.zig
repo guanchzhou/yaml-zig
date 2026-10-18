@@ -1765,6 +1765,75 @@ test "recovery collects one error per broken document across a stream" {
     try std.testing.expectEqualStrings("found tab used for indentation", errs.items[0].message);
 }
 
+test "input that is not valid UTF-8 is refused at its first bad byte, and recovery resumes at the next document" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    const cases = [_]struct { src: []const u8, message: []const u8 }{
+        .{ .src = "a: 1\nb: x\xffy\n", .message = "input is not valid UTF-8" },
+        .{ .src = "a: 1\nb: x\xe2\x80\n", .message = "input is not valid UTF-8" },
+        .{ .src = "a: 1\nb: x\xc2", .message = "input ends inside a UTF-8 sequence" },
+        .{ .src = "a: 1\nb: x # \xff\n", .message = "input is not valid UTF-8" },
+    };
+    for (cases) |c| {
+        var errs: std.ArrayList(Diagnostic) = .empty;
+        try std.testing.expectError(error.YamlParseError, parseStream(a, c.src, .{ .errors = &errs }));
+        try std.testing.expectEqualStrings(c.message, errs.items[0].message);
+        const lc = errs.items[0].span.lineCol(c.src);
+        try std.testing.expectEqual(@as(usize, 2), lc.line);
+        try std.testing.expect(lc.col == 5 or lc.col == 8);
+    }
+    // Each bad document is reported once, and the good ones around it are read.
+    var errs: std.ArrayList(Diagnostic) = .empty;
+    const src = "a: 1\n---\nb: \xff\n---\nc: 3\n---\nd: \xfe\n";
+    try std.testing.expectError(error.YamlParseError, parseStream(a, src, .{ .errors = &errs }));
+    try std.testing.expectEqual(@as(usize, 2), errs.items.len);
+    try std.testing.expectEqual(@as(usize, 3), errs.items[0].span.lineCol(src).line);
+    try std.testing.expectEqual(@as(usize, 7), errs.items[1].span.lineCol(src).line);
+}
+
+test "a run of bytes that are not UTF-8 costs one invalid token per token, not one per byte" {
+    const src = try std.testing.allocator.alloc(u8, 200_006);
+    defer std.testing.allocator.free(src);
+    @memcpy(src[0..3], "a: ");
+    @memset(src[3 .. src.len - 3], 0xff);
+    @memcpy(src[src.len - 3 ..], "\nb:");
+    var sc = scanner.Scanner.init(src);
+    var tokens: usize = 0;
+    while (sc.next()) |_| tokens += 1;
+    try std.testing.expect(tokens < 20);
+}
+
+test "a sequence the input ends inside is truncated only when some completion of it is UTF-8" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    const cases = [_]struct { src: []const u8, message: []const u8 }{
+        .{ .src = "a: \xe3\x81", .message = "input ends inside a UTF-8 sequence" },
+        .{ .src = "a: \xf0", .message = "input ends inside a UTF-8 sequence" },
+        .{ .src = "a: \xc0", .message = "input is not valid UTF-8" },
+        .{ .src = "a: \xed\xa0", .message = "input is not valid UTF-8" },
+        .{ .src = "a: \xf4\x90", .message = "input is not valid UTF-8" },
+    };
+    for (cases) |c| {
+        var errs: std.ArrayList(Diagnostic) = .empty;
+        try std.testing.expectError(error.YamlParseError, parseStream(a, c.src, .{ .errors = &errs }));
+        try std.testing.expectEqualStrings(c.message, errs.items[0].message);
+    }
+}
+
+test "the scanner ends its token stream with stream_end after a byte that is not UTF-8" {
+    var sc = scanner.Scanner.init("a: \xff\n");
+    var saw_invalid = false;
+    var last: scanner.TokenKind = .stream_start;
+    while (sc.next()) |t| {
+        if (t.kind == .invalid) saw_invalid = true;
+        last = t.kind;
+    }
+    try std.testing.expect(saw_invalid);
+    try std.testing.expectEqual(scanner.TokenKind.stream_end, last);
+}
+
 /// Drive the errors-sink recovery path under a hard iteration cap. Mirrors
 /// `Composer.run`: pull events, recover on error, bounding the total
 /// event+recovery iterations so a non-progressing recovery loop is caught

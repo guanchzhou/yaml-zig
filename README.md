@@ -5,7 +5,7 @@ A YAML 1.2.2 parser, decoder, and emitter for Zig.
 - **YAML 1.2.2 parsing** - block and flow collections, anchors and aliases,
   merge keys (`<<`), multi-document streams, tags, and every scalar style:
   plain, single- and double-quoted, and literal (`|`) / folded (`>`) block
-  scalars.
+  scalars. Input is UTF-8; a byte that is not valid UTF-8 is a parse error.
 - **Typed decoding** - `parseInto(Config, arena, src, .{})` deserializes
   straight into your Zig struct via comptime reflection, in a single
   streaming pass with no intermediate value tree for documents without
