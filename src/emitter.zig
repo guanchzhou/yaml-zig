@@ -543,6 +543,14 @@ fn emitFloat(w: *Io.Writer, f: f64) EmitError!void {
 
 // String styling
 
+/// True when `s` written as a plain scalar in block context reads back as
+/// this string under the core schema, the YAML 1.1 types, and the YAML 1.1
+/// readers in common use; false for bytes that are not UTF-8. `emit` writes
+/// a string plain exactly when this holds, and double-quoted otherwise.
+pub fn isPlainSafe(s: []const u8) bool {
+    return std.unicode.utf8ValidateSlice(s) and plainIsSafe(s);
+}
+
 fn emitString(w: *Io.Writer, s: []const u8) EmitError!void {
     if (!std.unicode.utf8ValidateSlice(s)) return error.InvalidUtf8;
     if (plainIsSafe(s)) {
@@ -1469,4 +1477,24 @@ test "sort_keys: typed struct fields sorted, honoring rename" {
     aw.clearRetainingCapacity();
     try emitTyped(&aw.writer, c, a, .{});
     try std.testing.expectEqualStrings("aaa: 1\nbbb:\n  yy: 2\n  xx: 3\n", aw.written());
+}
+
+test "isPlainSafe agrees with how emit writes a string" {
+    const cases = [_][]const u8{ "hello", "darwin", "yes", "YES", "yEs", "1st", "0123", "1:20", ":sym", "a: b", "a #b", "-1abc", "--- x", "", " lead", "trail ", "\xff", "caf\xc3\xa9" };
+    for (cases) |c| {
+        var aw: Io.Writer.Allocating = .init(std.testing.allocator);
+        defer aw.deinit();
+        const plain = isPlainSafe(c);
+        emit(&aw.writer, .{ .string = c }, .{}) catch |e| {
+            try std.testing.expect(e == error.InvalidUtf8);
+            try std.testing.expect(!plain);
+            continue;
+        };
+        const out = std.mem.trimEnd(u8, aw.written(), "\n");
+        try std.testing.expectEqual(plain, std.mem.eql(u8, out, c));
+    }
+    try std.testing.expect(isPlainSafe("darwin"));
+    try std.testing.expect(!isPlainSafe("yEs"));
+    try std.testing.expect(!isPlainSafe("1st"));
+    try std.testing.expect(!isPlainSafe("\xff"));
 }

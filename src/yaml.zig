@@ -53,6 +53,12 @@ pub const Tag = schema.Tag;
 /// that string under `schema`.
 pub const tagOf = schema.tagOf;
 
+/// True when `s` written as a plain scalar in block context reads back as
+/// this string under the core schema, the YAML 1.1 types, and the YAML 1.1
+/// readers in common use; false for bytes that are not UTF-8. `emit` writes
+/// a string plain exactly when this holds.
+pub const isPlainSafe = emitter.isPlainSafe;
+
 /// Indentation-aware streaming tokenizer over block-context YAML. Emits a
 /// flat token stream with explicit block-collection structure; see
 /// `scanner.zig`.
