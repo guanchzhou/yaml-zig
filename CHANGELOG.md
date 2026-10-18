@@ -4,6 +4,96 @@ All notable changes to this project are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-18
+
+Output changes: the emitter quotes more strings than before (`yes`, `y`,
+`0.0.0.0`, `1st`, a key named `y`), escapes characters it used to write
+raw, and writes very long keys as explicit keys, so byte-compared emitted
+YAML differs. `Schema` and `InvalidReason` gain members and `EmitError` an
+error, so an exhaustive `switch` over any of them needs new arms. The parser
+refuses input that is not valid UTF-8, and the scanner hands out an
+`.invalid` token before the token that holds such a byte.
+
+### Added
+
+- `Schema.yaml11`: resolve plain scalars by the YAML 1.1 types -- the
+  booleans `y`, `yes`, `on` and their negatives in each case form, integers
+  in base 2, 8, 10, 16 and 60 with `_` separators, 1.1 floats (an exponent
+  takes a sign; a fraction may hold `_`, as the type's own `685.230_15e+03`
+  writes it), nulls. Explicit `!!int`, `!!float`, `!!bool` and `!!null`
+  tags follow it under that schema. A timestamp, a merge key (`<<`), a value
+  key (`=`) and a 1.1 float spelling that names no number (`1.2.3`) have no
+  `Value` variant and resolve to their text.
+- `tagOf(schema, plain)` and `Tag`: the type a schema's grammar gives a
+  plain scalar, including the 1.1 types the `Value` model cannot hold.
+- `EmitError.InvalidUtf8`, for a string that is not valid UTF-8, and the
+  scanner's `InvalidReason.invalid_utf8` and `.truncated_utf8` (the input
+  ends inside a multi-byte sequence).
+
+### Fixed
+
+- The emitter quotes every string that the core schema, the YAML 1.1 types,
+  or a YAML 1.1 reader in common use (PyYAML, SnakeYAML, go-yaml v2, Psych,
+  js-yaml) would read as another type. Such strings were emitted plain
+  whenever the core schema read them as strings, so a YAML 1.1 reader turned
+  `"yes"` into `true` and `"0123"` into 83. A string starting with `---` or
+  `...` is quoted too: js-yaml 3 reads either as a document marker whatever
+  follows it.
+- The emitter escapes every character YAML does not let a scalar hold as it
+  is -- C1 control characters, U+FFFE and U+FFFF -- and U+FEFF, which a
+  reader strips as a byte order mark, and the YAML 1.1 line breaks U+0085,
+  U+2028 and U+2029 (`\N`, `\L`, `\P`). These were written raw, which
+  readers reject or alter. A string that is not valid UTF-8 is refused
+  instead of written as bytes no reader accepts.
+- A mapping key longer than the 1024 characters YAML allows an implicit key
+  is written as an explicit `? key` entry, by the emitter and by the
+  document model, which can now also append after an explicit-key member.
+- A string set inside a flow collection through the document model is
+  double-quoted: `set("m.a", "x, y")` on `m: {a: 1, b: 2}` wrote
+  `{a: x, y, b: 2}`, adding a key `y`. `setLiteral` there accepts only a
+  literal that stays one member of that collection, on one line and without
+  a comment.
+- A value set on a mapping member with no `:` (`{a, b: 2}`, or an explicit
+  `? a` with no value) gets its `:`, on a line indented to the `?` under a
+  block explicit key; it was appended to the key, so `set("m.a", "1")` made
+  the key `a "1"`. An explicit key with an empty `:` (`{? a :}`) takes the
+  value after its colon, not before it.
+- A value set on an empty block sequence entry (`-` alone) lands after its
+  `-`; it was spliced at the start of the sequence, so `set("[0]", 1)` on
+  `- \n- 2` wrote ` 1- `.
+- The document model never adds a key that is already there: a block scalar
+  key (`? >-`) matches by its text with its chomping applied, and an alias
+  key (`*x`) by the text of its anchor, so `set` edits that member.
+- A member added to a flow mapping is written in flow syntax -- `, key:
+  value` after the last member, or first inside `{}`, keys double-quoted and
+  a created chain nested as `{key: ...}` -- instead of as block lines, which
+  were valid only in some layouts. A created container is still refused
+  there.
+- An anchor or tag on the line of a mapping key that follows an empty value
+  (`x:\n&a k: v`) decorates that key, as YAML defines it and other readers
+  read it; the parser gave it to the empty value, so `*a` read as null.
+  After an empty value that has properties of its own (`k1: &a\n!!str k3:
+  v`), such a key was read as the first key of a nested mapping; it is a
+  sibling. After an explicit key with no value (`? k1\n&a k3: v`) it was
+  refused. yaml-test-suite case ZWK4 now matches the reference event stream:
+  294 cases match and 20 are documented divergences, 310 round-trip.
+- Replacing a block sequence that holds empty entries (`k:\n  -`) replaces
+  all of it; the new value was written in front of its `-`.
+- A value set on an empty value that carries only an anchor or a tag
+  (`a: &x`, `- !!str`) lands after them; it was spliced onto the next line,
+  joining the next key or entry.
+- The parser refuses input that is not valid UTF-8, reporting the first bad
+  byte of each document (or a grammar error the byte causes, where that is
+  found first), instead of returning strings that are not text. With an
+  `errors` sink, recovery resumes at the next document as after any other
+  error; the reader-backed stream reports the byte without reading past the
+  document that holds it.
+- A float the emitter writes in scientific form carries a dot and a signed
+  exponent (`1.0e+21`, `-1.5e+300`): `1e21` and `-1.5e300` read back as
+  strings under YAML 1.1 and in PyYAML and Psych.
+- A core integer beyond i128 written in hex or octal resolves to the float
+  nearest it, as a decimal one does, instead of to a string.
+
 ## [0.4.0] - 2026-07-22
 
 ### Added
@@ -176,7 +266,10 @@ document model, reader-backed streaming reader, and tooling.
   runnable examples (`basic`, `typed`, `stream`, `emit`, `spans`, `edit`,
   `event_stream`).
 
-[Unreleased]: https://github.com/sakakibara/yaml-zig/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/sakakibara/yaml-zig/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/sakakibara/yaml-zig/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/sakakibara/yaml-zig/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/sakakibara/yaml-zig/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/sakakibara/yaml-zig/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/sakakibara/yaml-zig/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/sakakibara/yaml-zig/releases/tag/v0.1.0
