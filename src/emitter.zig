@@ -6,10 +6,13 @@
 //! collections emit flow-empty `{}`/`[]` (block-empty is ambiguous).
 //!
 //! Scalar styling picks the narrowest round-trip-safe form: a string
-//! emits PLAIN when that survives a re-parse under the core schema and
-//! carries no syntactic indicator, otherwise double-quoted with escapes.
-//! The quoting predicate is deliberately conservative -- when in doubt it
-//! quotes, since a mis-parse silently corrupts the tree.
+//! emits PLAIN when the core schema, the YAML 1.1 types, and the YAML 1.1
+//! readers in common use all read it back as that string and it carries no
+//! syntactic indicator, otherwise double-quoted with escapes. The quoting
+//! predicate is deliberately conservative -- when in doubt it quotes, since
+//! a mis-parse silently corrupts the tree. A key that would be longer than
+//! the 1024 characters YAML allows an implicit key is written as an
+//! explicit `? key` entry.
 //!
 //! Floats use std.fmt.float.render in shortest round-trip mode, adapted
 //! to YAML: special values emit `.inf`/`-.inf`/`.nan`; integer-valued
@@ -57,8 +60,10 @@ pub const EmitOptions = struct {
 /// integer value exceeds the i128 data model limit (e.g. a u128 field
 /// whose value exceeds maxInt(i128)). `OutOfMemory` arises only on the
 /// `emitTyped` path, which builds a `Value` tree (and any `toYaml` hook
-/// values) in the caller's arena.
-pub const EmitError = Io.Writer.Error || error{ UnrepresentableScalar, UnrepresentableInt, NestingTooDeep, OutOfMemory };
+/// values) in the caller's arena. `InvalidUtf8` fires for a string that is
+/// not valid UTF-8: a YAML stream is Unicode text, so no spelling of it
+/// reads back as those bytes.
+pub const EmitError = Io.Writer.Error || error{ UnrepresentableScalar, UnrepresentableInt, NestingTooDeep, OutOfMemory, InvalidUtf8 };
 
 /// Maximum collection nesting depth. Matches the parser's default
 /// `max_depth` (128) so hand-built trees get the same bound.
@@ -213,6 +218,17 @@ pub fn renderScalar(w: *Io.Writer, value: Value) EmitError!void {
     }
 }
 
+/// `renderScalar` for a scalar inside a flow collection: a string is always
+/// double-quoted, as `emit` writes flow content, since flow context ends a
+/// plain scalar at `,`, `[`, `]`, `{` and `}`.
+pub fn renderFlowScalar(w: *Io.Writer, value: Value) EmitError!void {
+    switch (value) {
+        .seq, .map => return error.UnrepresentableScalar,
+        .string => |s| try emitDoubleQuoted(w, s),
+        else => try emitScalar(w, value),
+    }
+}
+
 fn emitDocument(w: *Io.Writer, value: Value, options: EmitOptions) EmitError!void {
     switch (value) {
         .seq => |s| {
@@ -274,16 +290,14 @@ fn emitBlockMap(w: *Io.Writer, entries: []const Entry, options: EmitOptions, dep
         var prev: ?SortCursor = null;
         for (0..entries.len) |_| {
             const idx = nextSortedIndex(entries, prev);
-            try writeIndent(w, options, depth);
-            try emitKey(w, entries[idx].key);
+            try emitKey(w, entries[idx].key, options, depth);
             try emitValueAfterMarker(w, entries[idx].value, options, depth);
             prev = .{ .key = entries[idx].key.string, .idx = idx };
         }
         return;
     }
     for (entries) |e| {
-        try writeIndent(w, options, depth);
-        try emitKey(w, e.key);
+        try emitKey(w, e.key, options, depth);
         try emitValueAfterMarker(w, e.value, options, depth);
     }
 }
@@ -374,10 +388,57 @@ fn emitValueAfterMarker(w: *Io.Writer, v: Value, options: EmitOptions, depth: us
 /// space; the value path adds the separator). Block maps with a non-
 /// scalar key are diverted to flow style upstream, so only scalar keys
 /// reach here.
-fn emitKey(w: *Io.Writer, key: Value) EmitError!void {
-    try emitScalar(w, key);
+/// The indented key of a block mapping entry and its `:`: an implicit key,
+/// or an explicit `? key` line when the key is past the implicit limit.
+fn emitKey(w: *Io.Writer, key: Value, options: EmitOptions, depth: usize) EmitError!void {
+    try writeIndent(w, options, depth);
+    if (try fitsImplicitKey(key)) {
+        try emitScalar(w, key);
+    } else {
+        try w.writeAll("? ");
+        try emitScalar(w, key);
+        try w.writeByte('\n');
+        try writeIndent(w, options, depth);
+    }
     try w.writeByte(':');
 }
+
+/// YAML limits an implicit key to 1024 Unicode characters as written.
+pub const max_implicit_key_chars = 1024;
+
+/// Whether `key`, written as `emitScalar` writes it, is short enough to be
+/// an implicit key.
+fn fitsImplicitKey(key: Value) EmitError!bool {
+    var counter: CharCounter = .{};
+    try emitScalar(&counter.writer, key);
+    return counter.chars <= max_implicit_key_chars;
+}
+
+/// A writer that only counts the Unicode characters written to it.
+const CharCounter = struct {
+    writer: Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
+    chars: usize = 0,
+
+    fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        const c: *CharCounter = @alignCast(@fieldParentPtr("writer", w));
+        var n: usize = 0;
+        for (data[0 .. data.len - 1]) |d| {
+            c.chars += leadBytes(d);
+            n += d.len;
+        }
+        const last = data[data.len - 1];
+        c.chars += leadBytes(last) * splat;
+        return n + last.len * splat;
+    }
+
+    fn leadBytes(d: []const u8) usize {
+        var k: usize = 0;
+        for (d) |b| {
+            if (b & 0xC0 != 0x80) k += 1;
+        }
+        return k;
+    }
+};
 
 /// Compact flow representation, used for mappings with a non-scalar key
 /// (and their nested values). Strings always double-quote here: flow
@@ -403,7 +464,7 @@ fn emitFlow(w: *Io.Writer, v: Value, options: EmitOptions, depth: usize) EmitErr
                 for (0..m.len) |i| {
                     const idx = nextSortedIndex(m, prev);
                     if (i > 0) try w.writeAll(", ");
-                    try emitFlow(w, m[idx].key, options, depth + 1);
+                    try emitFlowKey(w, m[idx].key, options, depth + 1);
                     try w.writeAll(": ");
                     try emitFlow(w, m[idx].value, options, depth + 1);
                     prev = .{ .key = m[idx].key.string, .idx = idx };
@@ -411,13 +472,7 @@ fn emitFlow(w: *Io.Writer, v: Value, options: EmitOptions, depth: usize) EmitErr
             } else {
                 for (m, 0..) |e, i| {
                     if (i > 0) try w.writeAll(", ");
-                    // A flow collection key needs the explicit `? ` indicator;
-                    // without it the parser reads `[k]: v` as two entries.
-                    switch (e.key) {
-                        .seq, .map => try w.writeAll("? "),
-                        else => {},
-                    }
-                    try emitFlow(w, e.key, options, depth + 1);
+                    try emitFlowKey(w, e.key, options, depth + 1);
                     try w.writeAll(": ");
                     try emitFlow(w, e.value, options, depth + 1);
                 }
@@ -427,6 +482,22 @@ fn emitFlow(w: *Io.Writer, v: Value, options: EmitOptions, depth: usize) EmitErr
         .string => |s| try emitDoubleQuoted(w, s),
         else => try emitScalar(w, v),
     }
+}
+
+/// A flow mapping key, with the explicit `? ` indicator where it needs one:
+/// a collection key (without it `[k]: v` reads as two entries), and a key
+/// that, as written, is past the implicit-key length limit.
+fn emitFlowKey(w: *Io.Writer, key: Value, options: EmitOptions, depth: usize) EmitError!void {
+    const explicit = switch (key) {
+        .seq, .map => true,
+        else => blk: {
+            var counter: CharCounter = .{};
+            try emitFlow(&counter.writer, key, options, depth);
+            break :blk counter.chars > max_implicit_key_chars;
+        },
+    };
+    if (explicit) try w.writeAll("? ");
+    try emitFlow(w, key, options, depth);
 }
 
 fn emitScalar(w: *Io.Writer, v: Value) EmitError!void {
@@ -442,7 +513,8 @@ fn emitScalar(w: *Io.Writer, v: Value) EmitError!void {
 
 /// Special floats use YAML core spellings; finite floats use
 /// std.fmt.float.render in shortest round-trip mode, with a `.0` suffix
-/// on integer-valued output so it re-parses as `.float`, not `.int`.
+/// on integer-valued output so it re-parses as `.float`, not `.int`, and in
+/// scientific form a dot and a signed exponent (`1.0e+21`).
 fn emitFloat(w: *Io.Writer, f: f64) EmitError!void {
     if (std.math.isNan(f)) return w.writeAll(".nan");
     if (std.math.isInf(f)) return w.writeAll(if (f < 0) "-.inf" else ".inf");
@@ -451,7 +523,14 @@ fn emitFloat(w: *Io.Writer, f: f64) EmitError!void {
     if (a != 0 and (a < 1e-6 or a >= 1e21)) {
         var buf: [std.fmt.float.bufferSize(.scientific, f64)]u8 = undefined;
         const s = std.fmt.float.render(&buf, f, .{ .mode = .scientific }) catch unreachable;
-        return w.writeAll(s); // scientific output always carries 'e': re-parses as float
+        // The YAML 1.1 float grammar needs a dot in the mantissa and a sign
+        // on the exponent; with both, every reader takes it as a float.
+        const e = std.mem.indexOfScalar(u8, s, 'e').?;
+        try w.writeAll(s[0..e]);
+        if (std.mem.indexOfScalar(u8, s[0..e], '.') == null) try w.writeAll(".0");
+        try w.writeByte('e');
+        if (s[e + 1] != '-') try w.writeByte('+');
+        return w.writeAll(s[e + 1 ..]);
     }
     var buf: [std.fmt.float.bufferSize(.decimal, f64)]u8 = undefined;
     const s = std.fmt.float.render(&buf, f, .{ .mode = .decimal }) catch unreachable;
@@ -465,6 +544,7 @@ fn emitFloat(w: *Io.Writer, f: f64) EmitError!void {
 // String styling
 
 fn emitString(w: *Io.Writer, s: []const u8) EmitError!void {
+    if (!std.unicode.utf8ValidateSlice(s)) return error.InvalidUtf8;
     if (plainIsSafe(s)) {
         try w.writeAll(s);
     } else {
@@ -472,26 +552,67 @@ fn emitString(w: *Io.Writer, s: []const u8) EmitError!void {
     }
 }
 
-/// Decide whether `s` survives emission as a PLAIN scalar: it must
-/// re-parse as a string under the core schema AND carry no syntactic
-/// construct that block context would read as structure. Conservative by
-/// design -- a false "safe" silently corrupts the round-trip, a false
-/// "unsafe" only adds quotes.
+/// Whether a YAML 1.1 reader in common use widens the 1.1 grammars to read
+/// `s` as something other than a string. Each widens them differently, so
+/// this covers them by shape rather than one grammar each:
+///
+/// - a number past what the 1.1 types allow: `_` in a fraction (PyYAML), an
+///   unsigned exponent (SnakeYAML, go-yaml v2, js-yaml), `_` anywhere and
+///   uppercase base prefixes such as `0X1F` (go-yaml v2, which drops every
+///   `_` and parses with Go's prefix rules, so `-_1` is a number), `,` digit
+///   groups (Psych), and `._5` (js-yaml) -- covered by quoting anything that,
+///   after an optional sign, starts with a digit, or with `.` or (signed)
+///   `_` followed by a digit or `_`;
+/// - booleans, nulls, `.inf` and `.nan` in any letter case (Psych);
+/// - a `:name` symbol (Psych).
+fn readerWidening(s: []const u8) bool {
+    if (s[0] == ':') return true;
+    const signed = s[0] == '+' or s[0] == '-';
+    const b = if (signed) s[1..] else s;
+    if (b.len == 0) return false;
+    if (std.ascii.isDigit(b[0])) return true;
+    if ((b[0] == '.' or (signed and b[0] == '_')) and b.len > 1 and (std.ascii.isDigit(b[1]) or b[1] == '_')) return true;
+    if (signed and b[0] == '_') return true;
+    for ([_][]const u8{ ".inf", ".nan" }) |w| if (std.ascii.eqlIgnoreCase(b, w)) return true;
+    if (signed) return false;
+    for ([_][]const u8{ "yes", "no", "on", "off", "true", "false", "null", "y", "n" }) |w| if (std.ascii.eqlIgnoreCase(s, w)) return true;
+    return false;
+}
+
+/// YAML's printable characters (`c-printable`), less tab and line breaks,
+/// which the caller handles.
+fn printable(cp: u21) bool {
+    return (cp >= 0x20 and cp <= 0x7E) or cp == 0x85 or (cp >= 0xA0 and cp <= 0xD7FF) or
+        (cp >= 0xE000 and cp <= 0xFFFD) or cp >= 0x10000;
+}
+
+/// Decide whether the valid UTF-8 `s` survives emission as a PLAIN scalar:
+/// it must re-parse as that string under the core schema, under the YAML 1.1
+/// types, and under the YAML 1.1 readers in common use, AND carry no
+/// syntactic construct that block context would read as structure.
+/// Conservative by design -- a false "safe" silently corrupts the
+/// round-trip, a false "unsafe" only adds quotes.
 fn plainIsSafe(s: []const u8) bool {
     if (s.len == 0) return false; // empty plain resolves to null
 
-    // Would the core schema read this text as null/bool/int/float? If so
-    // it must quote to stay a string. (Covers true, 123, ~, null, .inf,
-    // .nan, 0x1A, etc. -- schema.resolve owns the exact grammar.)
-    if (!resolvesToString(s)) return false;
+    // Would a core or a YAML 1.1 reader give this text another type? Many
+    // programs that read config files still use YAML 1.1, where `yes`,
+    // `0123`, `1:20`, a timestamp and `<<` are not strings. The schema
+    // module owns the exact grammars.
+    if (schema.tagOf(.core, s) != .str or schema.tagOf(.yaml11, s) != .str) return false;
+    if (readerWidening(s)) return false;
 
     // Leading/trailing whitespace is stripped or folded by the parser.
     if (s[0] == ' ' or s[0] == '\t') return false;
     if (s[s.len - 1] == ' ' or s[s.len - 1] == '\t') return false;
 
-    // Control chars and newlines force double-quoting (escapes).
-    for (s) |c| {
-        if (c < 0x20 or c == 0x7f) return false;
+    // Only characters YAML lets a plain scalar hold as they are: no control
+    // characters or line breaks (U+0085, U+2028 and U+2029 among them, line
+    // breaks to a YAML 1.1 reader), no non-characters, and no U+FEFF, which a
+    // reader strips as a byte order mark at the start of a stream.
+    var it: std.unicode.Utf8Iterator = .{ .bytes = s, .i = 0 };
+    while (it.nextCodepoint()) |cp| {
+        if (cp < 0x20 or cp == 0x7f or !printable(cp) or cp == 0x85 or cp == 0x2028 or cp == 0x2029 or cp == 0xFEFF) return false;
     }
 
     // Leading indicator that opens a non-plain construct in block context.
@@ -509,17 +630,11 @@ fn plainIsSafe(s: []const u8) bool {
         else => {},
     }
 
-    // Document markers `---` / `...` (bare or followed by a space) at
-    // column 0 are parsed as document-start/end directives, not scalars.
-    // Because plainIsSafe has no positional context, reject them
-    // unconditionally -- they are rare and quoting is the safe choice.
-    if (std.mem.eql(u8, s, "---") or std.mem.eql(u8, s, "...")) return false;
-    if (s.len >= 4 and (std.mem.startsWith(u8, s, "--- ") or std.mem.startsWith(u8, s, "... "))) return false;
-
-    // A bare plain `<<` triggers merge semantics when used as a mapping key.
-    // Quote it unconditionally (like `---`/`...` above) since plainIsSafe
-    // has no positional context; quoting `<<` in other positions is harmless.
-    if (std.mem.eql(u8, s, "<<")) return false;
+    // Document markers `---` / `...` at column 0 are parsed as
+    // document-start/end directives, not scalars, when bare or followed by
+    // a space -- and by js-yaml 3 whatever follows them. Because plainIsSafe
+    // has no positional context, quote any string that starts with one.
+    if (std.mem.startsWith(u8, s, "---") or std.mem.startsWith(u8, s, "...")) return false;
 
     // Interior `: ` reads as a mapping value; ` #` reads as a comment.
     var i: usize = 0;
@@ -533,37 +648,30 @@ fn plainIsSafe(s: []const u8) bool {
     return true;
 }
 
-/// True when the core schema leaves `s` as a `.string` (i.e. it is not a
-/// null/bool/int/float spelling). Uses a throwaway fixed buffer allocator
-/// since resolution only allocates to dupe a string result, which we
-/// discard.
-fn resolvesToString(s: []const u8) bool {
-    var buf: [64]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buf);
-    const resolved = schema.resolve(.core, fba.allocator(), s) catch {
-        // Allocation only fails for a long string result, which means it
-        // resolved to a string -- exactly the case we want.
-        return true;
-    };
-    return resolved == .string;
-}
-
+/// `s` double-quoted, or `error.InvalidUtf8` when it is not UTF-8: every character YAML does not let a
+/// double-quoted scalar hold as it is, and each line break of a YAML 1.1
+/// reader, escaped; U+FEFF too, which a reader would strip as a byte order
+/// mark at the start of a stream.
 fn emitDoubleQuoted(w: *Io.Writer, s: []const u8) EmitError!void {
+    if (!std.unicode.utf8ValidateSlice(s)) return error.InvalidUtf8;
     try w.writeByte('"');
-    for (s) |c| {
-        switch (c) {
+    var it: std.unicode.Utf8Iterator = .{ .bytes = s, .i = 0 };
+    while (it.nextCodepointSlice()) |bytes| {
+        const cp = std.unicode.utf8Decode(bytes) catch unreachable;
+        switch (cp) {
             '"' => try w.writeAll("\\\""),
             '\\' => try w.writeAll("\\\\"),
             0x08 => try w.writeAll("\\b"),
             0x09 => try w.writeAll("\\t"),
             0x0A => try w.writeAll("\\n"),
             0x0D => try w.writeAll("\\r"),
-            else => {
-                if (c < 0x20 or c == 0x7f) {
-                    try w.print("\\x{x:0>2}", .{c});
-                } else {
-                    try w.writeByte(c); // printable ASCII and UTF-8 continuation bytes pass through
-                }
+            0x85 => try w.writeAll("\\N"),
+            0x2028 => try w.writeAll("\\L"),
+            0x2029 => try w.writeAll("\\P"),
+            else => if (cp == 0xFEFF or !printable(cp)) {
+                if (cp <= 0xFF) try w.print("\\x{X:0>2}", .{cp}) else try w.print("\\u{X:0>4}", .{cp});
+            } else {
+                try w.writeAll(bytes);
             },
         }
     }
@@ -733,6 +841,158 @@ test "emit quotes scalars that would otherwise mis-parse" {
     try std.testing.expectEqualStrings("true", back.getT([]const u8, "a").?);
     try std.testing.expectEqualStrings("123", back.getT([]const u8, "b").?);
     try std.testing.expectEqualStrings("with: colon", back.getT([]const u8, "c").?);
+}
+
+test "emit quotes a string a core or YAML 1.1 reader would read as another type" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    const quoted = [_][]const u8{ "yes", "No", "on", "OFF", "y", "n", "=", "<<", "0123", "0b101", "1_000", "1:20", "190:20:30.15", "1.2.3", "2026-10-18", "2001-12-14t21:59:43.10-05:00", "-.Inf", "1e3", "08", "a\u{2028}b", "x\u{85}", "1:60" };
+    const plain = [_][]const u8{ "hello", "en_US.UTF-8", "Asia/Tokyo", "v1.2.3", "cafe", "yesterday", "_1", "-foo", "a:b", ".gitignore", "+x" };
+    for (quoted) |q| {
+        var aw: std.Io.Writer.Allocating = .init(a);
+        try emit(&aw.writer, .{ .string = q }, .{});
+        std.testing.expect(aw.written()[0] == '"') catch |e| {
+            std.debug.print("not quoted: {s}\n", .{q});
+            return e;
+        };
+        try std.testing.expectEqualStrings(q, (try parse(a, aw.written(), .{})).string);
+    }
+    for (plain) |p| {
+        var aw: std.Io.Writer.Allocating = .init(a);
+        try emit(&aw.writer, .{ .string = p }, .{});
+        try std.testing.expectEqualStrings(p, std.mem.trimEnd(u8, aw.written(), "\n"));
+    }
+}
+
+test "emit quotes a string a YAML 1.1 reader in common use widens its grammar to read as another type" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    // PyYAML: `_` in a fraction; SnakeYAML, go-yaml v2, js-yaml: unsigned
+    // exponents; go-yaml v2: uppercase prefixes and `_` after a sign; Psych:
+    // `,` groups, case-folded words and specials, `:symbols`; js-yaml: `._5`.
+    const quoted = [_][]const u8{ "1.0_0", "685.230_15e+03", "1_000e5", "0X1F", "0B101", "0O17", "-_1", "1,000", "1,000.5", "._5", "yES", "On", "NULL", "tRUE", ".InF", "+.INF", ".NaN", ":sym" };
+    for (quoted) |q| {
+        var aw: std.Io.Writer.Allocating = .init(a);
+        try emit(&aw.writer, .{ .string = q }, .{});
+        std.testing.expect(aw.written()[0] == '"') catch |e| {
+            std.debug.print("not quoted: {s}\n", .{q});
+            return e;
+        };
+        try std.testing.expectEqualStrings(q, (try parse(a, aw.written(), .{})).string);
+    }
+}
+
+test "emit escapes the characters YAML does not let a scalar hold as they are, and refuses bytes that are not UTF-8" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    const cases = [_]struct { in: []const u8, out: []const u8 }{
+        .{ .in = "a\u{80}b", .out = "\"a\\x80b\"\n" },
+        .{ .in = "\u{9f}", .out = "\"\\x9F\"\n" },
+        .{ .in = "x\u{FFFE}", .out = "\"x\\uFFFE\"\n" },
+        .{ .in = "\u{FEFF}a", .out = "\"\\uFEFFa\"\n" },
+        .{ .in = "caf\u{e9} \u{1F600}", .out = "caf\u{e9} \u{1F600}\n" },
+    };
+    for (cases) |c| {
+        var aw: std.Io.Writer.Allocating = .init(a);
+        try emit(&aw.writer, .{ .string = c.in }, .{});
+        try std.testing.expectEqualStrings(c.out, aw.written());
+        try std.testing.expectEqualStrings(c.in, (try parse(a, aw.written(), .{})).string);
+    }
+    var aw: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectError(error.InvalidUtf8, emit(&aw.writer, .{ .string = "a\xffb" }, .{}));
+}
+
+test "emit writes a key past the implicit key limit as an explicit key" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    const long = "k" ** 1100;
+    const entries = try a.dupe(Entry, &.{
+        .{ .key = .{ .string = long }, .value = .{ .int = 1 } },
+        .{ .key = .{ .string = "short" }, .value = .{ .int = 2 } },
+    });
+    var aw: std.Io.Writer.Allocating = .init(a);
+    try emit(&aw.writer, .{ .map = entries }, .{});
+    try std.testing.expectEqualStrings("? " ++ long ++ "\n: 1\nshort: 2\n", aw.written());
+    const back = try parse(a, aw.written(), .{});
+    try std.testing.expectEqual(@as(i64, 1), back.getT(i64, long).?);
+    var fits: std.Io.Writer.Allocating = .init(a);
+    try emit(&fits.writer, .{ .map = try a.dupe(Entry, &.{.{ .key = .{ .string = "k" ** 1024 }, .value = .{ .int = 1 } }}) }, .{});
+    try std.testing.expect(fits.written()[0] == 'k');
+}
+
+test "flow style refuses bytes that are not UTF-8, and writes a long or escaped key as an explicit key" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    const seq_key: Value = .{ .seq = try a.dupe(Value, &.{.{ .string = "x" }}) };
+    for ([_][]const u8{ "a\xff", "a\xc3" }) |bad| {
+        var aw: std.Io.Writer.Allocating = .init(a);
+        const m: Value = .{ .map = try a.dupe(Entry, &.{.{ .key = seq_key, .value = .{ .string = bad } }}) };
+        try std.testing.expectError(error.InvalidUtf8, emit(&aw.writer, m, .{}));
+    }
+    // 600 quotes are 1200 characters once escaped.
+    const quotes = "\"" ** 600;
+    const long = "k" ** 2000;
+    for ([_]bool{ false, true }) |sorted| {
+        const inner: Value = .{ .map = try a.dupe(Entry, &.{.{ .key = .{ .string = long }, .value = .{ .int = 1 } }}) };
+        const m: Value = .{ .map = try a.dupe(Entry, &.{
+            .{ .key = seq_key, .value = inner },
+            .{ .key = .{ .string = quotes }, .value = .{ .int = 2 } },
+        }) };
+        var aw: std.Io.Writer.Allocating = .init(a);
+        try emit(&aw.writer, m, .{ .sort_keys = sorted });
+        try std.testing.expect(std.mem.indexOf(u8, aw.written(), "? \"" ++ "k" ** 10) != null);
+        try std.testing.expect(std.mem.indexOf(u8, aw.written(), "? \"\\\"\\\"") != null);
+        const back = try parse(a, aw.written(), .{});
+        try std.testing.expectEqual(@as(usize, 2), back.map.len);
+    }
+}
+
+test "emit quotes a string that starts like a document marker" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    for ([_][]const u8{ "---x", "---", "----", "--->", "...a", "..." }) |q| {
+        var aw: std.Io.Writer.Allocating = .init(a);
+        try emit(&aw.writer, .{ .string = q }, .{});
+        try std.testing.expect(aw.written()[0] == '"');
+        try std.testing.expectEqualStrings(q, (try parse(a, aw.written(), .{})).string);
+    }
+}
+
+test "emit writes a float in scientific form that the core and YAML 1.1 schemas both read as that float" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    const cases = [_]struct { f: f64, out: []const u8 }{
+        .{ .f = 1e21, .out = "1.0e+21" },
+        .{ .f = -1.5e300, .out = "-1.5e+300" },
+        .{ .f = 1e-7, .out = "1.0e-7" },
+        .{ .f = 2.5e-10, .out = "2.5e-10" },
+    };
+    for (cases) |c| {
+        var aw: std.Io.Writer.Allocating = .init(a);
+        try emit(&aw.writer, .{ .float = c.f }, .{});
+        try std.testing.expectEqualStrings(c.out, std.mem.trimEnd(u8, aw.written(), "\n"));
+        for ([_]schema.Schema{ .core, .yaml11 }) |sch| {
+            const back = try parse(a, aw.written(), .{ .schema = sch });
+            try std.testing.expectEqual(c.f, back.float);
+        }
+    }
+}
+
+test "emit escapes YAML 1.1 line breaks in a double-quoted string" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    var aw: std.Io.Writer.Allocating = .init(a);
+    try emit(&aw.writer, .{ .string = "a\u{85}b\u{2028}c\u{2029}d\"" }, .{});
+    try std.testing.expectEqualStrings("\"a\\Nb\\Lc\\Pd\\\"\"\n", aw.written());
+    try std.testing.expectEqualStrings("a\u{85}b\u{2028}c\u{2029}d\"", (try parse(a, aw.written(), .{})).string);
 }
 
 test "round-trip arbitrary parsed value" {
@@ -1112,7 +1372,7 @@ test "sort_keys: recurses into nested mappings" {
     var aw: std.Io.Writer.Allocating = .init(a);
     defer aw.deinit();
     try emit(&aw.writer, v, .{ .sort_keys = true });
-    try std.testing.expectEqualStrings("a: 3\nb:\n  x: 2\n  y: 1\n", aw.written());
+    try std.testing.expectEqualStrings("a: 3\nb:\n  x: 2\n  \"y\": 1\n", aw.written());
 }
 
 test "sort_keys: byte-lexicographic order (uppercase sorts before lowercase)" {

@@ -1619,7 +1619,7 @@ fn renderScalarValue(arena: Allocator, value: Value) Error![]const u8 {
     defer aw.deinit();
     emitter.renderScalar(&aw.writer, value) catch |err| switch (err) {
         error.WriteFailed, error.OutOfMemory => return error.OutOfMemory,
-        error.UnrepresentableScalar, error.UnrepresentableInt, error.NestingTooDeep => return error.InvalidValue,
+        error.UnrepresentableScalar, error.UnrepresentableInt, error.NestingTooDeep, error.InvalidUtf8 => return error.InvalidValue,
     };
     return arena.dupe(u8, aw.written());
 }
@@ -1675,7 +1675,7 @@ fn renderContainerBlock(arena: Allocator, value: Value, base_indent: []const u8,
     defer aw.deinit();
     emitter.emit(&aw.writer, value, .{ .indent = indent_step }) catch |err| switch (err) {
         error.WriteFailed, error.OutOfMemory => return error.OutOfMemory,
-        error.UnrepresentableScalar, error.UnrepresentableInt, error.NestingTooDeep => return error.InvalidValue,
+        error.UnrepresentableScalar, error.UnrepresentableInt, error.NestingTooDeep, error.InvalidUtf8 => return error.InvalidValue,
     };
     const rendered = aw.written();
     const body = rendered[0 .. rendered.len - 1];
@@ -1977,7 +1977,7 @@ test "append a nested new key" {
     var aw: std.Io.Writer.Allocating = .init(a);
     defer aw.deinit();
     try doc.emit(&aw.writer);
-    try std.testing.expectEqualStrings("server:\n  port: 80\n  host: 0.0.0.0\n", aw.written());
+    try std.testing.expectEqualStrings("server:\n  port: 80\n  host: \"0.0.0.0\"\n", aw.written());
 }
 test "append via setLiteral" {
     var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1999,7 +1999,7 @@ test "set creates a missing intermediate mapping, then the leaf" {
     var aw: std.Io.Writer.Allocating = .init(a);
     defer aw.deinit();
     try doc.emit(&aw.writer);
-    try std.testing.expectEqualStrings("a: 1\nx:\n  y: 1\n", aw.written());
+    try std.testing.expectEqualStrings("a: 1\nx:\n  \"y\": 1\n", aw.written());
     try std.testing.expectEqual(@as(i64, 1), doc.getT(i64, "x.y").?);
 }
 test "set creates a 3-deep missing path, preserving surrounding trivia" {
@@ -2012,7 +2012,7 @@ test "set creates a 3-deep missing path, preserving surrounding trivia" {
     var aw: std.Io.Writer.Allocating = .init(a);
     defer aw.deinit();
     try doc.emit(&aw.writer);
-    try std.testing.expectEqualStrings("# header\na: 1  # keep\nx:\n  y:\n    z: 2\n", aw.written());
+    try std.testing.expectEqualStrings("# header\na: 1  # keep\nx:\n  \"y\":\n    z: 2\n", aw.written());
     try std.testing.expectEqual(@as(i64, 2), doc.getT(i64, "x.y.z").?);
     // Untouched prefix bytes (comment + original key/comment) are preserved.
     try std.testing.expectEqual(@as(i64, 1), doc.getT(i64, "a").?);
@@ -2085,7 +2085,7 @@ test "setValueSegments creates the single literal key, not a nested dotted path"
     var aw: std.Io.Writer.Allocating = .init(a);
     defer aw.deinit();
     try doc.emit(&aw.writer);
-    try std.testing.expectEqualStrings("other: 1\nhost:\n  example.com: 1.2.3.4\n", aw.written());
+    try std.testing.expectEqualStrings("other: 1\nhost:\n  example.com: \"1.2.3.4\"\n", aw.written());
 
     // Re-parse independently and confirm the key is the single literal
     // "example.com", not a nested "example" -> "com" mapping. A dotted-path
@@ -2206,7 +2206,7 @@ test "set infers a 4-space document's indent step for a created nested mapping" 
     var aw: std.Io.Writer.Allocating = .init(a);
     defer aw.deinit();
     try doc.emit(&aw.writer);
-    try std.testing.expectEqualStrings("top:\n    x: 1\ny:\n    z: 2\n", aw.written());
+    try std.testing.expectEqualStrings("top:\n    x: 1\n\"y\":\n    z: 2\n", aw.written());
     try std.testing.expectEqual(@as(i64, 1), doc.getT(i64, "top.x").?);
     try std.testing.expectEqual(@as(i64, 2), doc.getT(i64, "y.z").?);
 }
@@ -2726,7 +2726,7 @@ test "set over a literal block scalar replaces the whole block" {
     const a = ar.allocator();
     var doc = try Document.parse(a, "a: |\n  x\n", .{});
     try doc.set("a", "y");
-    try std.testing.expectEqualStrings("a: y\n", try emitToString(a, &doc));
+    try std.testing.expectEqualStrings("a: \"y\"\n", try emitToString(a, &doc));
     try std.testing.expectEqualStrings("y", doc.getT([]const u8, "a").?);
 }
 test "set over an unquoted plain scalar still works (control)" {
@@ -2901,7 +2901,7 @@ test "set on an alias replaces the whole *name, not just the name" {
     var doc = try Document.parse(a, "x: &x 1\ny: &y 2\nref: *x\n", .{});
     // Intends the STRING "y"; must NOT leave a `*` turning it into an alias.
     try doc.set("ref", "y");
-    try std.testing.expectEqualStrings("x: &x 1\ny: &y 2\nref: y\n", try emitToString(a, &doc));
+    try std.testing.expectEqualStrings("x: &x 1\ny: &y 2\nref: \"y\"\n", try emitToString(a, &doc));
     try std.testing.expectEqualStrings("y", doc.getT([]const u8, "ref").?);
     // It is a string, not an alias re-resolving to &y's int 2.
     try std.testing.expect(doc.getT(i64, "ref") == null);
@@ -2984,7 +2984,7 @@ test "setValueSegments replaces an existing scalar value with a mapping" {
         .{ .key = .{ .string = "x" }, .value = .{ .int = 1 } },
         .{ .key = .{ .string = "y" }, .value = .{ .int = 2 } },
     }) });
-    try std.testing.expectEqualStrings("a:\n  x: 1\n  y: 2\nb: 2\n", try emitToString(a, &doc));
+    try std.testing.expectEqualStrings("a:\n  x: 1\n  \"y\": 2\nb: 2\n", try emitToString(a, &doc));
     try std.testing.expectEqual(@as(i64, 1), doc.getT(i64, "a.x").?);
     try std.testing.expectEqual(@as(i64, 2), doc.getT(i64, "a.y").?);
     try std.testing.expectEqual(@as(i64, 2), doc.getT(i64, "b").?);
@@ -3080,7 +3080,7 @@ test "setValueSegments nests a container at a 4-space document's inferred indent
     try doc.setValueSegments(&.{ "top", "y" }, .{ .map = @constCast(&[_]value_mod.Entry{
         .{ .key = .{ .string = "z" }, .value = .{ .int = 2 } },
     }) });
-    try std.testing.expectEqualStrings("top:\n    x: 1\n    y:\n        z: 2\n", try emitToString(a, &doc));
+    try std.testing.expectEqualStrings("top:\n    x: 1\n    \"y\":\n        z: 2\n", try emitToString(a, &doc));
     try std.testing.expectEqual(@as(i64, 2), doc.getT(i64, "top.y.z").?);
 }
 

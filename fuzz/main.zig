@@ -347,7 +347,7 @@ fn checkRoundTrip(a: std.mem.Allocator, values: []const yaml.Value) Failure!void
     defer aw.deinit();
     yaml.emitStream(&aw.writer, values, .{}) catch |err| switch (err) {
         error.WriteFailed, error.OutOfMemory => return error.OutOfMemory,
-        error.NestingTooDeep, error.UnrepresentableScalar, error.UnrepresentableInt => return error.EmitFailed,
+        error.NestingTooDeep, error.UnrepresentableScalar, error.UnrepresentableInt, error.InvalidUtf8 => return error.EmitFailed,
     };
 
     const reparsed = yaml.parseStream(a, aw.written(), .{
@@ -370,7 +370,7 @@ fn checkSortStable(a: std.mem.Allocator, values: []const yaml.Value) Failure!voi
     defer first.deinit();
     yaml.emitStream(&first.writer, values, .{ .sort_keys = true }) catch |err| switch (err) {
         error.WriteFailed, error.OutOfMemory => return error.OutOfMemory,
-        error.NestingTooDeep, error.UnrepresentableScalar, error.UnrepresentableInt => return error.EmitFailed,
+        error.NestingTooDeep, error.UnrepresentableScalar, error.UnrepresentableInt, error.InvalidUtf8 => return error.EmitFailed,
     };
 
     const reparsed = yaml.parseStream(a, first.written(), .{
@@ -382,7 +382,7 @@ fn checkSortStable(a: std.mem.Allocator, values: []const yaml.Value) Failure!voi
     defer second.deinit();
     yaml.emitStream(&second.writer, reparsed, .{ .sort_keys = true }) catch |err| switch (err) {
         error.WriteFailed, error.OutOfMemory => return error.OutOfMemory,
-        error.NestingTooDeep, error.UnrepresentableScalar, error.UnrepresentableInt => return error.EmitFailed,
+        error.NestingTooDeep, error.UnrepresentableScalar, error.UnrepresentableInt, error.InvalidUtf8 => return error.EmitFailed,
     };
 
     if (!std.mem.eql(u8, first.written(), second.written())) return error.SortNotStable;

@@ -20,7 +20,9 @@ A YAML 1.2.2 parser, decoder, and emitter for Zig.
   mean" suggestions.
 - **Round-trip-safe emitter** - a block-style emitter that picks the
   narrowest safe scalar style and quotes anything that would otherwise
-  re-resolve to the wrong type (`"true"` stays a string, not a bool).
+  re-resolve to the wrong type under the core schema, the YAML 1.1 types, or
+  the YAML 1.1 readers in common use (`"true"`, `"yes"` and `"1_000"` stay
+  strings).
 - **Lossless document model** - parse, edit, and emit byte-identical when
   unmodified and minimal-diff when edited; comments, formatting, anchors,
   and quoting are preserved. Validated round-tripping all 310 parseable
@@ -200,7 +202,18 @@ try yaml.emit(&aw.writer, v, .{});
 `emit` writes one `Value` as block YAML; `emitStream` writes a slice of
 documents separated by `---`. The emitter chooses the narrowest
 round-trip-safe scalar style: `flag_word: "true"` stays double-quoted so it
-re-parses as the string `"true"`, not the boolean `true`. Empty collections
+re-parses as the string `"true"`, not the boolean `true`. A string is plain
+only when it reads back as that string under the core schema and the YAML
+1.1 types (`yaml.tagOf`), so `yes`, `0123`, `1:20` and a timestamp are
+quoted, and under the YAML 1.1 readers in common use, which widen those
+types each in their own way: anything number-like after an optional sign
+(`1.0_0`, `0X1F`, `1,000`, `1st`), the boolean and null words in any letter
+case, a leading `:`, and a leading `---` or `...` are quoted too. A character YAML does not let a
+scalar hold as it is (a control character, U+FFFE, U+FFFF) is written as an
+escape, as are U+FEFF and the YAML 1.1 line breaks U+0085, U+2028 and
+U+2029 (`\N`, `\L`, `\P`); a string that is not valid UTF-8 is refused
+with `error.InvalidUtf8`. A key longer than the 1024 characters YAML allows
+an implicit key is written as an explicit `? key` entry. Empty collections
 emit flow-empty `{}` / `[]`.
 
 To emit a typed value (consulting the same annotations and the `toYaml`
@@ -282,7 +295,7 @@ never re-split:
 var doc = try yaml.Document.empty(arena, .{});
 try doc.setSegments(&.{ "host", "example.com" }, "1.2.3.4");
 // host:
-//   example.com: 1.2.3.4  -- one literal key, not nested.
+//   example.com: "1.2.3.4"  -- one literal key, not nested.
 ```
 
 ### Reader-backed streaming
