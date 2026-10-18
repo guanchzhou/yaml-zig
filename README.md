@@ -265,17 +265,23 @@ try doc.emit(&aw.writer);
 
 `set` on an existing path replaces only the value's bytes; the key, the
 `:`, comments, indentation, and siblings stay put. `set` on a missing leaf
-appends a new member to its enclosing block mapping, matching the
-indentation of the last sibling. Missing intermediate mappings along the
-path are created too (`set("a.b.c", v)` creates `a` and `a.b` as needed,
+appends a new member to its enclosing mapping: in a block mapping at the
+indentation of the last sibling, in a flow mapping in flow syntax
+(`, key: value`). Missing intermediate mappings along the path are created
+too (`set("a.b.c", v)` creates `a` and `a.b` as needed,
 each nesting level indented one step deeper -- sampled from an existing
 nesting level in the document, or 2 spaces when there is none to sample);
 sequence elements are still only ever replaced, never created. A created
 key is quoted whenever its plain form would misparse (e.g. `true`, `123`,
-a leading `- `), so it always reads back as the exact string requested and
-never fabricates a different structure. The emitted document differs from
-the input only where edits were applied. See `examples/edit.zig` for a
-runnable walk-through.
+`y`, a leading `- `), so it always reads back as the exact string requested and
+never fabricates a different structure; one past the implicit-key length is
+written as an explicit `? key` entry. A string set inside a flow collection
+(`{a: 1}`, `[1, 2]`) is double-quoted, as flow content needs, and
+`setLiteral` there accepts only a literal that stays one member of it, on
+one line and without a comment, and that does not begin like a document
+marker where it would start a line. The emitted document differs from the input
+only where edits were applied. See `examples/edit.zig` for a runnable
+walk-through.
 
 `setValue` writes a dynamic `Value` directly instead of a comptime Zig
 type; `addCommentBefore` / `removeCommentBefore` manage a line's leading

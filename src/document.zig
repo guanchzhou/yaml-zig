@@ -109,6 +109,15 @@ const Node = struct {
     /// The inner value bytes a read decodes from / matches on.
     content: Span2,
     style: ScalarStyle = .plain,
+    /// A block scalar's header (`|-`, `>+2`...), which decides how its
+    /// content cooks.
+    block_header: scanner_mod.BlockHeader = .{},
+    /// A collection written in flow style (`{...}`, `[...]`, or a
+    /// single-pair `[a: 1]` entry), whose members follow flow's stricter
+    /// plain-scalar rules.
+    flow: bool = false,
+    /// For an alias (`*name`), the node its anchor names, when known.
+    alias: ?*Node = null,
     data: union(enum) {
         scalar,
         mapping: std.ArrayList(Member),
@@ -128,7 +137,12 @@ const Member = struct {
     key: struct {
         decoded: []const u8,
         outer: Span2,
+        /// Whether `decoded` is the key's text: false for a key that is a
+        /// collection, or an alias to one, which no string path names.
+        addressable: bool = true,
     },
+    /// Offset of the explicit-key `?` indicator, for a `? key` entry.
+    explicit: ?usize = null,
     /// Byte just past the `:` value indicator, or null for a bare key with no
     /// `:` at all. An empty value's node is anchored here so a `set` renders
     /// after the colon rather than splicing into the key.
@@ -255,8 +269,9 @@ pub const Document = struct {
     /// new member, creating any missing intermediate mapping(s) too. This is
     /// the named, canonical setter `set` delegates to for its `Value` case.
     pub fn setValue(self: *Document, path: []const u8, value: Value) Error!void {
-        const raw = try renderScalarValue(self.arena, value);
-        return self.setRaw(path, raw);
+        const segments = try segmentsFromPath(self.arena, path);
+        const raw = try renderScalarValue(self.arena, value, self.flowParent(segments) != null);
+        return self.setRawSegments(segments, raw);
     }
 
     /// Set the value at `path` to literal YAML source. `raw` must parse as a
@@ -266,10 +281,21 @@ pub const Document = struct {
     /// pre-formatted YAML (specific flow style, quoting) without the scalar
     /// renderer's normalization. Like `set`, a missing leaf in an existing
     /// block mapping appends a new member, creating any missing intermediate
-    /// mapping(s) too.
+    /// mapping(s) too. Inside a flow collection `raw` must stay one member of
+    /// it, on one line, without a comment, and not begin like a document
+    /// marker or directive where it would start a line. An anchor `raw`
+    /// defines rebinds every later alias of that name, as YAML defines.
     pub fn setLiteral(self: *Document, path: []const u8, raw: []const u8) Error!void {
-        try self.validateLiteral(raw);
-        return self.setRaw(path, try self.arena.dupe(u8, raw));
+        const segments = try segmentsFromPath(self.arena, path);
+        const flow = self.flowParent(segments);
+        try self.validateLiteral(raw, flow);
+        // In a flow collection spread over lines, a member can start a line:
+        // there a document marker or directive would begin a new document.
+        if (flow != null and markerLike(raw)) if (resolveNodeSegments(self.roots[0], segments)) |node| {
+            const at = node.outer.start;
+            if (node.outer.end > at and (at == 0 or self.source[at - 1] == '\n')) return error.InvalidValue;
+        };
+        return self.setRawSegments(segments, try self.arena.dupe(u8, raw));
     }
 
     /// Segment-taking twin of `set`. `segments` are literal mapping keys
@@ -306,18 +332,96 @@ pub const Document = struct {
                 return self.setContainerSegments(segs, value);
             },
             else => {
-                const raw = try renderScalarValue(self.arena, value);
-                return self.setRawSegments(try segmentsFromKeys(self.arena, segments), raw);
+                const segs = try segmentsFromKeys(self.arena, segments);
+                return self.setRawSegments(segs, try renderScalarValue(self.arena, value, self.flowParent(segs) != null));
             },
         }
     }
 
-    /// Reparse `raw` on its own; `error.InvalidValue` unless it yields exactly
-    /// one YAML document holding a single value.
-    fn validateLiteral(self: *const Document, raw: []const u8) Error!void {
-        _ = composer.parse(self.arena, raw, self.options) catch {
-            return error.InvalidValue;
+    const FlowKind = enum { mapping, sequence };
+
+    /// Whether `raw` starts the way a document marker (`---`, `...`) or a
+    /// directive (`%`) does, read at the start of a line.
+    fn markerLike(raw: []const u8) bool {
+        if (raw.len > 0 and raw[0] == '%') return true;
+        for ([_][]const u8{ "---", "..." }) |m| {
+            if (std.mem.startsWith(u8, raw, m) and (raw.len == 3 or raw[3] == ' ' or raw[3] == '\t')) return true;
+        }
+        return false;
+    }
+
+    /// The kind of the flow collection the node `segments` names sits in, or
+    /// null when its parent is a block collection or the path is missing. A
+    /// flow collection holds only flow content, so its parent decides.
+    fn flowParent(self: *const Document, segments: []const Segment) ?FlowKind {
+        if (self.roots.len == 0 or segments.len == 0) return null;
+        var cur = self.roots[0];
+        for (segments, 0..) |seg, n| {
+            if (n == segments.len - 1) {
+                if (!cur.flow) return null;
+                return switch (cur.data) {
+                    .mapping => .mapping,
+                    .sequence => .sequence,
+                    .scalar => null,
+                };
+            }
+            cur = switch (seg) {
+                .key => |k| if (cur.data == .mapping) blk: {
+                    // A member created under a flow mapping is created in
+                    // flow syntax, nested mappings and all.
+                    const i = findMemberIndex(cur, k) orelse return if (cur.flow) .mapping else null;
+                    break :blk cur.data.mapping.items[i].value;
+                } else return null,
+                .index => |i| if (cur.data == .sequence and i < cur.data.sequence.items.len) cur.data.sequence.items[i] else return null,
+                .raw => return null,
+            };
+        }
+        return null;
+    }
+
+    /// Reparse `raw` where it will sit; `error.InvalidValue` unless it yields
+    /// exactly one YAML document holding a single value there. Inside a flow
+    /// collection of kind `flow` it must be one member of it, on one line,
+    /// holding no comment (the rest of the collection follows it on its
+    /// line): wrapped in a collection of that kind, the scanner's flow depth
+    /// stays above zero until the wrapper's own closing bracket, the last
+    /// byte, and no `,` separates members at the literal's own level.
+    fn validateLiteral(self: *const Document, raw: []const u8, flow: ?FlowKind) Error!void {
+        const f = flow orelse {
+            _ = composer.parse(self.arena, raw, self.options) catch return error.InvalidValue;
+            return;
         };
+        if (std.mem.indexOfAny(u8, raw, "\r\n") != null) return error.InvalidValue;
+        const text = switch (f) {
+            .sequence => try std.mem.concat(self.arena, u8, &.{ "[", raw, "]" }),
+            .mapping => try std.mem.concat(self.arena, u8, &.{ "{k: ", raw, "}" }),
+        };
+        var sc = Scanner.initWithComments(text);
+        var depth: usize = 0;
+        var closed = false;
+        while (sc.next()) |t| {
+            if (closed and t.kind != .stream_end) return error.InvalidValue;
+            switch (t.kind) {
+                .comment, .invalid => return error.InvalidValue,
+                .flow_sequence_start, .flow_mapping_start => depth += 1,
+                .flow_sequence_end, .flow_mapping_end => {
+                    if (depth == 0) return error.InvalidValue;
+                    depth -= 1;
+                    if (depth == 0) {
+                        if (t.span.start != text.len - 1) return error.InvalidValue;
+                        closed = true;
+                    }
+                },
+                .flow_entry => if (depth == 1) return error.InvalidValue,
+                else => {},
+            }
+        }
+        if (!closed) return error.InvalidValue;
+        const v = composer.parse(self.arena, text, self.options) catch return error.InvalidValue;
+        switch (f) {
+            .sequence => if (v != .seq or v.seq.len != 1) return error.InvalidValue,
+            .mapping => if (v != .map or v.map.len != 1 or v.map[0].key != .string or !std.mem.eql(u8, v.map[0].key.string, "k")) return error.InvalidValue,
+        }
     }
 
     /// Splice `raw` over the value span of the node at `path`, then rebuild
@@ -334,7 +438,29 @@ pub const Document = struct {
     /// created by `insertMissing`.
     fn setRawSegments(self: *Document, segments: []const Segment, raw: []const u8) Error!void {
         if (self.roots.len == 0) return error.PathNotFound;
-        if (resolveNodeSegments(self.roots[0], segments)) |node| {
+        if (resolveWithParentSegments(self.roots[0], segments)) |r| {
+            const node = r.node;
+            // A member with no `:` (`{a, b}`, or an explicit `? a` with no
+            // value) has its empty value at the key's end: writing there
+            // would join the key. Give it its `:` -- after the key in flow,
+            // on a line of its own under an explicit block key.
+            if (node.outer.start == node.outer.end) if (r.parent) |p| if (p.data == .mapping and p.data.mapping.items[r.index].sep_end == null) {
+                // After an alias key the `:` needs a space: it may be part
+                // of an anchor name (`*a:`).
+                if (p.flow) {
+                    const key_start = p.data.mapping.items[r.index].key.outer.start;
+                    const sep: []const u8 = if (self.source[key_start] == '*') " : " else ": ";
+                    return self.applyEdit(node.outer.start, node.outer.start, try std.mem.concat(self.arena, u8, &.{ sep, raw }));
+                }
+                // The `:` line is indented to the `?` indicator's column.
+                const q = p.data.mapping.items[r.index].explicit orelse return error.InvalidValue;
+                var line_start = q;
+                while (line_start > 0 and self.source[line_start - 1] != '\n') line_start -= 1;
+                const indent = try spaces(self.arena, q - line_start);
+                const at = self.lineEnd(node.outer.start);
+                const lead: []const u8 = if (at > 0 and self.source[at - 1] != '\n') "\n" else "";
+                return self.applyEdit(at, at, try std.mem.concat(self.arena, u8, &.{ lead, indent, ": ", raw, "\n" }));
+            };
             // An empty value is a zero-width node anchored just past the `:`
             // (or the key end). Splicing `raw` at the anchor may glue it to
             // the colon/key (`a:` + 1 -> `a:1`). When the byte at the anchor
@@ -378,18 +504,44 @@ pub const Document = struct {
     /// falls through to this function with an empty list.
     fn insertMissing(self: *Document, segments: []const Segment, raw: []const u8) Error!void {
         switch (try self.resolveMissingTarget(segments)) {
-            .append => |t| return self.appendMember(t.parent, t.key, raw),
-            .chain => |t| return self.appendMappingTail(t.parent, t.keys, raw),
+            .append => |t| return if (t.parent.flow) self.appendFlowMember(t.parent, &.{t.key}, raw) else self.appendMember(t.parent, t.key, raw),
+            .chain => |t| return if (t.parent.flow) self.appendFlowMember(t.parent, t.keys, raw) else self.appendMappingTail(t.parent, t.keys, raw),
         }
+    }
+
+    /// Add `keys[0]` to the flow mapping `parent`, in flow syntax: after its
+    /// last member as `, key: value`, or first inside an empty `{}`; a chain
+    /// of further keys nests as `{key: ...}`. `raw` is already written for
+    /// flow context. A single-pair entry of a flow sequence (`[a: 1]`) holds
+    /// one pair only.
+    fn appendFlowMember(self: *Document, parent: *Node, keys: []const []const u8, raw: []const u8) Error!void {
+        if (parent.outer.start >= self.source.len or self.source[parent.outer.start] != '{') return error.InvalidValue;
+        var entry: []const u8 = raw;
+        var i = keys.len;
+        while (i > 0) {
+            i -= 1;
+            const key = try renderFlowKey(self.arena, keys[i]);
+            entry = if (i == keys.len - 1)
+                try std.mem.concat(self.arena, u8, &.{ key, ": ", entry })
+            else
+                try std.mem.concat(self.arena, u8, &.{ key, ": {", entry, "}" });
+        }
+        const members = parent.data.mapping.items;
+        if (members.len == 0) return self.applyEdit(parent.outer.start + 1, parent.outer.start + 1, entry);
+        const last = members[members.len - 1];
+        const at = @max(last.key.outer.end, last.value.outer.end);
+        return self.applyEdit(at, at, try std.mem.concat(self.arena, u8, &.{ ", ", entry }));
     }
 
     /// Container twin of `insertMissing`: same target resolution, but the
     /// new leaf's value is a non-empty `.map`/`.seq` rendered as a nested
     /// block collection instead of an inline scalar.
     fn insertMissingContainer(self: *Document, segments: []const Segment, value: Value) Error!void {
+        // A container is created only in a block mapping: it is rendered as a
+        // block collection.
         switch (try self.resolveMissingTarget(segments)) {
-            .append => |t| return self.appendMemberContainer(t.parent, t.key, value),
-            .chain => |t| return self.appendMappingTailContainer(t.parent, t.keys, value),
+            .append => |t| return if (t.parent.flow) error.InvalidValue else self.appendMemberContainer(t.parent, t.key, value),
+            .chain => |t| return if (t.parent.flow) error.InvalidValue else self.appendMappingTailContainer(t.parent, t.keys, value),
         }
     }
 
@@ -465,6 +617,7 @@ pub const Document = struct {
     /// line to model an indentation from, so appending into it is out of
     /// scope (`error.InvalidValue`), unchanged from before.
     fn memberInsertion(self: *const Document, parent: *Node) Error!struct { indent: []const u8, at: usize } {
+        if (parent.flow) return error.InvalidValue;
         const members = parent.data.mapping.items;
         if (members.len == 0) {
             if (parent.outer.start == parent.outer.end) {
@@ -475,15 +628,13 @@ pub const Document = struct {
 
         const last = members[members.len - 1];
         // Indentation of the new member = the column the last sibling's key
-        // begins at (the bytes from its line start to the key).
-        var line_start = last.key.outer.start;
+        // begins at, or its explicit-key `?` indicator: only blanks before it
+        // on its line, or else spaces to its column (`- ? a`).
+        const start = last.explicit orelse last.key.outer.start;
+        var line_start = start;
         while (line_start > 0 and self.source[line_start - 1] != '\n') line_start -= 1;
-        const indent = self.source[line_start..last.key.outer.start];
-        // A non-whitespace indent prefix means the last member is not the
-        // first thing on its line (e.g. a flow mapping); not a block append.
-        for (indent) |c| {
-            if (c != ' ' and c != '\t') return error.InvalidValue;
-        }
+        const prefix = self.source[line_start..start];
+        const indent = if (std.mem.indexOfNone(u8, prefix, " \t") == null) prefix else if (last.explicit != null) try spaces(self.arena, start - line_start) else return error.InvalidValue;
 
         // Insert after the LINE end of the last sibling's value (not the raw
         // value-span end), so any trailing comment or whitespace on that line
@@ -505,8 +656,7 @@ pub const Document = struct {
     /// of silently fabricating a different structure or an unaddressable key.
     fn appendMember(self: *Document, parent: *Node, key: []const u8, raw: []const u8) Error!void {
         const ins = try self.memberInsertion(parent);
-        const rendered_key = try renderScalarValue(self.arena, .{ .string = key });
-        const text = try std.mem.concat(self.arena, u8, &.{ ins.indent, rendered_key, ": ", raw, "\n" });
+        const text = try std.mem.concat(self.arena, u8, &.{ ins.indent, try renderKey(self.arena, key, ins.indent), " ", raw, "\n" });
         return self.applyEdit(ins.at, ins.at, text);
     }
 
@@ -585,10 +735,9 @@ pub const Document = struct {
     /// block on the following line(s), nested one indent step under it.
     fn appendMemberContainer(self: *Document, parent: *Node, key: []const u8, value: Value) Error!void {
         const ins = try self.memberInsertion(parent);
-        const rendered_key = try renderScalarValue(self.arena, .{ .string = key });
         const step = self.inferIndentStep();
         const block = try renderContainerBlock(self.arena, value, try indentBy(self.arena, ins.indent, step), step);
-        const text = try std.mem.concat(self.arena, u8, &.{ ins.indent, rendered_key, ":\n", block });
+        const text = try std.mem.concat(self.arena, u8, &.{ ins.indent, try renderKey(self.arena, key, ins.indent), "\n", block });
         return self.applyEdit(ins.at, ins.at, text);
     }
 
@@ -1077,7 +1226,7 @@ fn findMemberIndex(node: *const Node, key: []const u8) ?usize {
     var mi = items.len;
     while (mi > 0) {
         mi -= 1;
-        if (std.mem.eql(u8, items[mi].key.decoded, key)) return mi;
+        if (items[mi].key.addressable and std.mem.eql(u8, items[mi].key.decoded, key)) return mi;
     }
     return null;
 }
@@ -1157,16 +1306,15 @@ fn findNestedIndentStep(source: []const u8, node: *const Node) ?usize {
 fn renderMappingTail(arena: Allocator, base_indent: []const u8, keys: []const []const u8, raw: []const u8, indent_step: usize) Error![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
     for (keys, 0..) |k, level| {
-        try buf.appendSlice(arena, base_indent);
-        try buf.appendNTimes(arena, ' ', level * indent_step);
-        const rendered_key = try renderScalarValue(arena, .{ .string = k });
-        try buf.appendSlice(arena, rendered_key);
+        const indent = try indentBy(arena, base_indent, level * indent_step);
+        try buf.appendSlice(arena, indent);
+        try buf.appendSlice(arena, try renderKey(arena, k, indent));
         if (level == keys.len - 1) {
-            try buf.appendSlice(arena, ": ");
+            try buf.append(arena, ' ');
             try buf.appendSlice(arena, raw);
             try buf.append(arena, '\n');
         } else {
-            try buf.appendSlice(arena, ":\n");
+            try buf.append(arena, '\n');
         }
     }
     return buf.toOwnedSlice(arena);
@@ -1178,11 +1326,10 @@ fn renderMappingTail(arena: Allocator, base_indent: []const u8, keys: []const []
 fn renderMappingTailContainer(arena: Allocator, base_indent: []const u8, keys: []const []const u8, value: Value, indent_step: usize) Error![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
     for (keys, 0..) |k, level| {
-        try buf.appendSlice(arena, base_indent);
-        try buf.appendNTimes(arena, ' ', level * indent_step);
-        const rendered_key = try renderScalarValue(arena, .{ .string = k });
-        try buf.appendSlice(arena, rendered_key);
-        try buf.appendSlice(arena, ":\n");
+        const indent = try indentBy(arena, base_indent, level * indent_step);
+        try buf.appendSlice(arena, indent);
+        try buf.appendSlice(arena, try renderKey(arena, k, indent));
+        try buf.append(arena, '\n');
     }
     const block_indent = try indentBy(arena, base_indent, keys.len * indent_step);
     const block = try renderContainerBlock(arena, value, block_indent, indent_step);
@@ -1206,6 +1353,12 @@ const TokenStream = struct {
     toks: []const Token,
     src: []const u8,
     pos: usize = 0,
+    /// Each anchor's node so far, so an alias key matches by its text.
+    anchors: std.StringHashMapUnmanaged(*Node) = .empty,
+    /// An anchor written before an implicit key, which the scanner hands out
+    /// ahead of the key's own token: it names the key the mapping builder
+    /// takes next.
+    key_anchor: ?[]const u8 = null,
 
     fn peekKind(self: *const TokenStream) ?TokenKind {
         if (self.pos >= self.toks.len) return null;
@@ -1287,14 +1440,38 @@ fn buildDocumentRoot(arena: Allocator, ts: *TokenStream, max_depth: usize) Error
 /// consuming its whole subtree. `depth` bounds nesting.
 fn buildNode(arena: Allocator, ts: *TokenStream, max_depth: usize, depth: usize) Error!*Node {
     if (depth > max_depth) return error.NestingTooDeep;
-    // Skip leading node properties (anchor/tag): they decorate the node but are
-    // not part of its value span for editing purposes.
+    // Leading node properties (anchor/tag) decorate the node but are not part
+    // of its value span for editing purposes. An empty node they decorate
+    // sits just past them, not at whatever token follows.
+    var anchor: ?[]const u8 = null;
+    var props_end: ?usize = null;
     while (ts.peekKind()) |k| {
-        if (k == .anchor or k == .tag) _ = ts.take() else break;
+        if (k != .anchor and k != .tag) break;
+        // Properties first on a later line, leading into a key there, are
+        // that key's (`k1: &a\n!!str k3: v`), not this node's.
+        if (props_end != null and propsOfKeyAt(ts, ts.pos)) break;
+        const p = ts.take();
+        props_end = tokEnd(p);
+        if (k == .anchor) anchor = ts.src[tokStart(p)..tokEnd(p)];
     }
+    // Properties on the same line as a block mapping's first implicit key
+    // belong to that key, not to the mapping.
+    if (props_end) |end| if (ts.peekKind() == .block_mapping_start) {
+        const start = tokStart(ts.peek().?);
+        if (start >= end and std.mem.indexOfScalar(u8, ts.src[end..start], '\n') == null) {
+            ts.key_anchor = anchor;
+            anchor = null;
+        }
+    };
+    const node = try buildNodeBody(arena, ts, max_depth, depth, props_end);
+    if (anchor) |name| try ts.anchors.put(arena, name, node);
+    return node;
+}
+
+fn buildNodeBody(arena: Allocator, ts: *TokenStream, max_depth: usize, depth: usize, props_end: ?usize) Error!*Node {
     const t = ts.peek() orelse {
         // Properties with no following node: an empty scalar at end.
-        const at: usize = ts.src.len;
+        const at: usize = props_end orelse ts.src.len;
         return makeNode(arena, .{ .start = at, .end = at }, .scalar);
     };
     switch (t.kind) {
@@ -1311,16 +1488,20 @@ fn buildNode(arena: Allocator, ts: *TokenStream, max_depth: usize, depth: usize)
         // only the name and leaves a stray `*`, silently re-aliasing the value.
         .alias => {
             _ = ts.take();
-            return makeNode(arena, .{ .start = tokStart(t) - 1, .end = tokEnd(t) }, .scalar);
+            const node = try makeNode(arena, .{ .start = tokStart(t) - 1, .end = tokEnd(t) }, .scalar);
+            node.alias = ts.anchors.get(ts.src[tokStart(t)..tokEnd(t)]);
+            return node;
         },
         // A bare `key`/`value` indicator with no scalar is an empty node.
         .key, .value, .block_entry => {
-            return makeNode(arena, .{ .start = tokStart(t), .end = tokStart(t) }, .scalar);
+            const at = props_end orelse tokStart(t);
+            return makeNode(arena, .{ .start = at, .end = at }, .scalar);
         },
         else => {
-            // Defensive: any other token here means the stream shape did not
-            // match the grammar (already ruled out by the composer).
-            return makeNode(arena, .{ .start = tokStart(t), .end = tokStart(t) }, .scalar);
+            // Any other token ends the node before it begins (a block end, a
+            // flow separator or closer): an empty node.
+            const at = props_end orelse tokStart(t);
+            return makeNode(arena, .{ .start = at, .end = at }, .scalar);
         },
     }
 }
@@ -1359,10 +1540,28 @@ fn buildMapping(arena: Allocator, ts: *TokenStream, max_depth: usize, depth: usi
         // the cursor so an entry that consumes no token (an unforeseen stuck
         // token shape) fails fast instead of spinning this loop forever.
         const before = ts.pos;
-        if (k == .key) _ = ts.take();
+        // Properties ahead of an implicit key's `.key` token belong to the
+        // key: step over them to the token.
+        var j = ts.pos;
+        while (j < ts.toks.len and (ts.toks[j].kind == .anchor or ts.toks[j].kind == .tag)) j += 1;
+        if (j > ts.pos and j < ts.toks.len and ts.toks[j].kind == .key) {
+            for (ts.toks[ts.pos..j]) |p| {
+                if (p.kind == .anchor) ts.key_anchor = ts.src[tokStart(p)..tokEnd(p)];
+            }
+            ts.pos = j;
+        }
+        const k_now = ts.peekKind().?;
+        // An implicit key gets a `.key` token too; only a `?` is explicit.
+        const explicit: ?usize = if (k_now == .key) blk: {
+            const at = tokStart(ts.take());
+            break :blk if (at < ts.src.len and ts.src[at] == '?') at else null;
+        } else null;
 
-        // The key node.
+        // The key node, and the anchor written before it.
+        const key_anchor = ts.key_anchor;
+        ts.key_anchor = null;
         const key_node = try buildNode(arena, ts, max_depth, depth + 1);
+        if (key_anchor) |name| try ts.anchors.put(arena, name, key_node);
         lo = @min(lo, key_node.outer.start);
         hi = @max(hi, key_node.outer.end);
 
@@ -1373,12 +1572,12 @@ fn buildMapping(arena: Allocator, ts: *TokenStream, max_depth: usize, depth: usi
         var sep_end: ?usize = null;
         if (ts.peekKind() == .value) {
             const colon = ts.take();
-            sep_end = tokEnd(colon);
+            sep_end = indicatorEnd(ts.src, colon, ':');
             // After the `:`, a value node -- unless the next token closes the
             // mapping or starts the next entry (an empty value).
             const nk = ts.peekKind();
             if (nk == null or nk == end_kind or nk == .key or
-                (flow and nk == .flow_entry))
+                (flow and nk == .flow_entry) or propsOfNextKey(ts))
             {
                 const at = sep_end.?;
                 value_node = try makeNode(arena, .{ .start = at, .end = at }, .scalar);
@@ -1394,17 +1593,17 @@ fn buildMapping(arena: Allocator, ts: *TokenStream, max_depth: usize, depth: usi
         hi = @max(hi, value_node.outer.end);
 
         try members.append(arena, .{
-            .key = .{
-                .decoded = try decodeNodeContent(arena, ts.src, key_node),
-                .outer = key_node.outer,
-            },
+            .key = try memberKey(arena, ts.src, key_node),
+            .explicit = explicit,
             .sep_end = sep_end,
             .value = value_node,
         });
         if (ts.pos == before) return error.InvalidValue;
     }
 
-    return makeNode(arena, .{ .start = lo, .end = hi }, .{ .mapping = members });
+    const node = try makeNode(arena, .{ .start = lo, .end = hi }, .{ .mapping = members });
+    node.flow = flow;
+    return node;
 }
 
 /// Build a sequence node. Block sequences are framed by
@@ -1441,12 +1640,17 @@ fn buildSequence(arena: Allocator, ts: *TokenStream, max_depth: usize, depth: us
             continue;
         }
         if (!flow and k == .block_entry) {
-            _ = ts.take();
-            // An empty entry (`-` with nothing, then end/next entry).
+            const dash = ts.take();
+            // An empty entry (`-` with nothing, then end/next entry): its
+            // value sits just past its own `-`.
             const nk = ts.peekKind();
             if (nk == null or nk == end_kind or nk == .block_entry) {
-                const at: usize = tokEnd(open);
+                const at: usize = indicatorEnd(ts.src, dash, '-');
                 const e = try makeNode(arena, .{ .start = at, .end = at }, .scalar);
+                // The sequence spans its empty entries' dashes too, so a
+                // replacement of the whole sequence takes them with it.
+                lo = @min(lo, tokStart(dash));
+                hi = @max(hi, at);
                 try elems.append(arena, e);
                 continue;
             }
@@ -1467,7 +1671,9 @@ fn buildSequence(arena: Allocator, ts: *TokenStream, max_depth: usize, depth: us
         try elems.append(arena, e);
     }
 
-    return makeNode(arena, .{ .start = lo, .end = hi }, .{ .sequence = elems });
+    const node = try makeNode(arena, .{ .start = lo, .end = hi }, .{ .sequence = elems });
+    node.flow = flow;
+    return node;
 }
 
 /// Build one flow-sequence element. Usually a plain node, but a `key`/`value`
@@ -1501,7 +1707,7 @@ fn buildFlowSeqElement(
         var sep_end: ?usize = null;
         if (ts.peekKind() == .value) {
             const colon = ts.take();
-            sep_end = tokEnd(colon);
+            sep_end = indicatorEnd(ts.src, colon, ':');
             const nk = ts.peekKind();
             if (nk == null or nk == end_kind or nk == .flow_entry) {
                 const at = sep_end.?;
@@ -1516,14 +1722,13 @@ fn buildFlowSeqElement(
         hi = @max(hi, value_node.outer.end);
         var members: std.ArrayList(Member) = .empty;
         try members.append(arena, .{
-            .key = .{
-                .decoded = try decodeNodeContent(arena, ts.src, key_node),
-                .outer = key_node.outer,
-            },
+            .key = try memberKey(arena, ts.src, key_node),
             .sep_end = sep_end,
             .value = value_node,
         });
-        return makeNode(arena, .{ .start = lo, .end = hi }, .{ .mapping = members });
+        const node = try makeNode(arena, .{ .start = lo, .end = hi }, .{ .mapping = members });
+        node.flow = true;
+        return node;
     }
     _ = flow;
     return buildNode(arena, ts, max_depth, depth + 1);
@@ -1565,14 +1770,54 @@ fn decodeNodeContent(arena: Allocator, src: []const u8, node: *const Node) Error
         .span = .{ .start = node.content.start, .end = node.content.end },
         .scalar_style = style,
         .value = content,
-        // A key is never a block scalar in practice; pass a default header so
-        // the cooker has one if a `|`/`>` content ever reaches here.
-        .block_header = if (style == .literal or style == .folded) .{} else null,
+        .block_header = if (style == .literal or style == .folded) node.block_header else null,
     };
     return composer.cookScalarText(arena, src, ev) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.InvalidValue,
     };
+}
+
+/// Whether the next tokens are properties written on the line of the
+/// implicit key that follows them, so they belong to that key and not to an
+/// empty value before it (`a:\n&x b: 2`).
+fn propsOfNextKey(ts: *const TokenStream) bool {
+    return propsOfKeyAt(ts, ts.pos);
+}
+
+/// `propsOfNextKey` for the properties starting at token `first`.
+fn propsOfKeyAt(ts: *const TokenStream, first: usize) bool {
+    var j = first;
+    while (j < ts.toks.len and (ts.toks[j].kind == .anchor or ts.toks[j].kind == .tag)) j += 1;
+    if (j == first or j >= ts.toks.len or ts.toks[j].kind != .key) return false;
+    // An anchor's token covers its name only: step back over its `&` (and a
+    // tag's `!`).
+    var props_start = tokStart(ts.toks[first]);
+    while (props_start > 0 and (ts.src[props_start - 1] == '&' or ts.src[props_start - 1] == '!')) props_start -= 1;
+    const key_start = tokStart(ts.toks[j]);
+    var line_start = props_start;
+    while (line_start > 0 and ts.src[line_start - 1] != '\n') line_start -= 1;
+    // On the key's line, and first on that line: not trailing the `:`.
+    return std.mem.indexOfScalar(u8, ts.src[props_start..key_start], '\n') == null and
+        std.mem.indexOfNone(u8, ts.src[line_start..props_start], " \t") == null;
+}
+
+/// A mapping key's identity: its cooked text, through an alias to the
+/// scalar its anchor names; not addressable when it is a collection.
+fn memberKey(arena: Allocator, src: []const u8, key_node: *const Node) Error!@FieldType(Member, "key") {
+    var k = key_node;
+    if (k.alias) |target| k = target;
+    if (k.data != .scalar or (k == key_node and key_node.alias == null and src.len > key_node.outer.start and key_node.outer.end > key_node.outer.start and src[key_node.outer.start] == '*'))
+        return .{ .decoded = "", .outer = key_node.outer, .addressable = false };
+    return .{ .decoded = try decodeNodeContent(arena, src, k), .outer = key_node.outer };
+}
+
+/// The byte just past the indicator `c` (`:` or `-`) a token stands for.
+/// The scanner gives some indicators a zero-width token in front of the
+/// byte: the `:` of an explicit key, and a block sequence's `-`.
+fn indicatorEnd(src: []const u8, t: Token, c: u8) usize {
+    const e = tokEnd(t);
+    return if (tokStart(t) == e and e < src.len and src[e] == c) e + 1 else e;
 }
 
 /// Build a node whose `outer` and `content` coincide (collections, empty
@@ -1606,7 +1851,7 @@ fn makeScalarNode(arena: Allocator, src: []const u8, t: Token) Error!*Node {
         },
     };
     const node = try arena.create(Node);
-    node.* = .{ .outer = outer, .content = content, .style = t.style, .data = .scalar };
+    node.* = .{ .outer = outer, .content = content, .style = t.style, .block_header = t.block_header, .data = .scalar };
     return node;
 }
 
@@ -1614,10 +1859,37 @@ fn makeScalarNode(arena: Allocator, src: []const u8, t: Token) Error!*Node {
 
 /// Render a scalar `Value` to its YAML bytes via the emitter, so the quoting
 /// is identical to `emit`. Collections are out of scope for scalar edits.
-fn renderScalarValue(arena: Allocator, value: Value) Error![]const u8 {
+/// A new block mapping key and its `:`, the key quoted as the emitter quotes
+/// it: an implicit key, or, past the length YAML allows one, an explicit
+/// `? key` line followed by `:` at `indent`.
+fn renderKey(arena: Allocator, key: []const u8, indent: []const u8) Error![]const u8 {
+    const rendered = try renderScalarValue(arena, .{ .string = key }, false);
+    var chars: usize = 0;
+    for (rendered) |b| {
+        if (b & 0xC0 != 0x80) chars += 1;
+    }
+    if (chars <= emitter.max_implicit_key_chars) return std.mem.concat(arena, u8, &.{ rendered, ":" });
+    return std.mem.concat(arena, u8, &.{ "? ", rendered, "\n", indent, ":" });
+}
+
+/// A new flow mapping key, double-quoted as flow content needs, as an
+/// explicit `? key` past the implicit-key length limit.
+fn renderFlowKey(arena: Allocator, key: []const u8) Error![]const u8 {
+    const rendered = try renderScalarValue(arena, .{ .string = key }, true);
+    var chars: usize = 0;
+    for (rendered) |b| {
+        if (b & 0xC0 != 0x80) chars += 1;
+    }
+    if (chars <= emitter.max_implicit_key_chars) return rendered;
+    return std.mem.concat(arena, u8, &.{ "? ", rendered });
+}
+
+/// `value` as a scalar the emitter writes, in flow style when it lands
+/// inside a flow collection.
+fn renderScalarValue(arena: Allocator, value: Value, flow: bool) Error![]const u8 {
     var aw: std.Io.Writer.Allocating = .init(arena);
     defer aw.deinit();
-    emitter.renderScalar(&aw.writer, value) catch |err| switch (err) {
+    (if (flow) emitter.renderFlowScalar(&aw.writer, value) else emitter.renderScalar(&aw.writer, value)) catch |err| switch (err) {
         error.WriteFailed, error.OutOfMemory => return error.OutOfMemory,
         error.UnrepresentableScalar, error.UnrepresentableInt, error.NestingTooDeep, error.InvalidUtf8 => return error.InvalidValue,
     };
@@ -1651,6 +1923,12 @@ fn emptyContainerToken(value: Value) []const u8 {
 /// `base` with `extra_spaces` additional spaces appended -- one indent
 /// level deeper than `base`, in the document's own indentation bytes plus
 /// however many more spaces a created/sampled step adds.
+fn spaces(arena: Allocator, n: usize) Error![]const u8 {
+    const out = try arena.alloc(u8, n);
+    @memset(out, ' ');
+    return out;
+}
+
 fn indentBy(arena: Allocator, base: []const u8, extra_spaces: usize) Error![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
     try buf.appendSlice(arena, base);
@@ -3101,4 +3379,260 @@ test "setValueSegments on the whole document root rejects a container value" {
     var doc = try Document.parse(a, "a: 1\n", .{});
     try std.testing.expectError(error.InvalidValue, doc.setValueSegments(&.{}, .{ .map = &.{} }));
     try std.testing.expectEqualStrings("a: 1\n", try emitToString(a, &doc));
+}
+
+test "a value set inside a flow collection stays one scalar there" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    var doc = try Document.parse(a, "m: {a: 1, b: 2}\nl: [1, 2]\n", .{});
+    try doc.set("m.a", "x, y");
+    try doc.set("l[0]", "a]b");
+    try std.testing.expectEqualStrings("m: {a: \"x, y\", b: 2}\nl: [\"a]b\", 2]\n", try emitToString(a, &doc));
+    try std.testing.expectEqualStrings("x, y", doc.getT([]const u8, "m.a").?);
+    try std.testing.expectEqualStrings("a]b", doc.getT([]const u8, "l[0]").?);
+    try std.testing.expect(doc.get("m.y") == null);
+}
+
+test "a created key past the implicit key limit is written as an explicit key" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    const long = "k" ** 1100;
+    var doc = try Document.parse(a, "a: 1\n", .{});
+    try doc.setSegments(&.{long}, @as(i64, 2));
+    try doc.setSegments(&.{ "m", long }, @as(i64, 3));
+    try std.testing.expectEqualStrings("a: 1\n? " ++ long ++ "\n: 2\nm:\n  ? " ++ long ++ "\n  : 3\n", try emitToString(a, &doc));
+    try std.testing.expectEqual(@as(i64, 2), doc.getT(i64, long).?);
+}
+
+test "a literal set inside a flow collection must stay one member of it" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    var doc = try Document.parse(a, "m: {a: 1, b: 2}\nl: [1, 2]\n", .{});
+    try std.testing.expectError(error.InvalidValue, doc.setLiteral("m.a", "x, y"));
+    try std.testing.expectError(error.InvalidValue, doc.setLiteral("l[0]", "a, b"));
+    try std.testing.expectError(error.InvalidValue, doc.setLiteral("l[0]", "1] #"));
+    try std.testing.expectError(error.InvalidValue, doc.setLiteral("m.a", "1} #"));
+    try std.testing.expectError(error.InvalidValue, doc.setLiteral("m.a", "1 # note"));
+    try std.testing.expectError(error.InvalidValue, doc.setLiteral("m.a", "1}: x"));
+    try std.testing.expectError(error.InvalidValue, doc.setLiteral("m.a", "x\n---\ny"));
+    try std.testing.expectError(error.InvalidValue, doc.setLiteral("l[0]", "1]: x"));
+    var root_flow = try Document.parse(a, "{a: 1}\n", .{});
+    try std.testing.expectError(error.InvalidValue, root_flow.setLiteral("a", "1}: {b: 2"));
+    var seq_flow = try Document.parse(a, "- {a: 1}\n", .{});
+    try std.testing.expectError(error.InvalidValue, seq_flow.setLiteral("[0].a", "1}: x"));
+    try seq_flow.setLiteral("[0].a", "{b: [2, 3]}");
+    try std.testing.expectEqualStrings("- {a: {b: [2, 3]}}\n", try emitToString(a, &seq_flow));
+    try doc.setLiteral("m.a", "\"x, y\"");
+    try doc.setLiteral("l[0]", "[3, 4]");
+    try std.testing.expectEqualStrings("m: {a: \"x, y\", b: 2}\nl: [[3, 4], 2]\n", try emitToString(a, &doc));
+}
+
+test "a value written into a member with no `:` gets its `:` instead of joining the key" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    var flow = try Document.parse(a, "m: {a, b: 2}\nn: {? c, d: 4}\n", .{});
+    try flow.set("m.a", "1");
+    try flow.setLiteral("n.c", "3");
+    try std.testing.expectEqualStrings("m: {a: \"1\", b: 2}\nn: {? c: 3, d: 4}\n", try emitToString(a, &flow));
+    try std.testing.expectEqualStrings("1", flow.getT([]const u8, "m.a").?);
+    try std.testing.expectEqual(@as(i64, 3), flow.getT(i64, "n.c").?);
+    var block = try Document.parse(a, "x:\n  ? a\n  b: 2\n", .{});
+    try block.set("x.a", @as(i64, 1));
+    try std.testing.expectEqualStrings("x:\n  ? a\n  : 1\n  b: 2\n", try emitToString(a, &block));
+    try std.testing.expectEqual(@as(i64, 1), block.getT(i64, "x.a").?);
+}
+
+test "a literal that would start a line of a flow collection cannot begin like a document marker" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    var doc = try Document.parse(a, "[\n1,\n2\n]\n", .{});
+    try std.testing.expectError(error.InvalidValue, doc.setLiteral("[0]", "--- x"));
+    try std.testing.expectError(error.InvalidValue, doc.setLiteral("[0]", "... x"));
+    try std.testing.expectError(error.InvalidValue, doc.setLiteral("[0]", "%YAML 1.2"));
+    try doc.setLiteral("[0]", "---x");
+    var inline_doc = try Document.parse(a, "l: [1, 2]\n", .{});
+    try inline_doc.setLiteral("l[0]", "--- x");
+    try std.testing.expectEqualStrings("--- x", inline_doc.getT([]const u8, "l[0]").?);
+}
+
+test "an explicit key with an empty `:` takes the value after its colon, indented to its `?`" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    var flow = try Document.parse(a, "m: {? a :, b: 2}\n", .{});
+    try flow.set("m.a", @as(i64, 1));
+    try std.testing.expectEqual(@as(i64, 1), flow.getT(i64, "m.a").?);
+    var block = try Document.parse(a, "? a\n:\nb: 2\n", .{});
+    try block.set("a", @as(i64, 1));
+    try std.testing.expectEqual(@as(i64, 1), block.getT(i64, "a").?);
+    var seq = try Document.parse(a, "- ? a\n  b: 2\n", .{});
+    try seq.set("[0].a", @as(i64, 1));
+    try std.testing.expectEqualStrings("- ? a\n  : 1\n  b: 2\n", try emitToString(a, &seq));
+    var next_line = try Document.parse(a, "?\n  a\nb: 2\n", .{});
+    try next_line.set("a", @as(i64, 1));
+    try std.testing.expectEqual(@as(i64, 1), next_line.getT(i64, "a").?);
+}
+
+test "a key is never added twice: block scalar and alias keys match by their text" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    var chomped = try Document.parse(a, "? >-\n  k\n: 5\n", .{});
+    try chomped.set("k", @as(i64, 1));
+    try std.testing.expectEqualStrings("? >-\n  k\n: 1\n", try emitToString(a, &chomped));
+    var aliased = try Document.parse(a, "a: &x k\n? *x\n", .{});
+    try aliased.set("k", @as(i64, 1));
+    try std.testing.expectEqualStrings("a: &x k\n? *x\n: 1\n", try emitToString(a, &aliased));
+    try std.testing.expectEqual(@as(i64, 1), aliased.getT(i64, "k").?);
+    // Another key beside an alias key is added as usual.
+    var beside = try Document.parse(a, "a: &x k\nm:\n  *x : 1\n  b: 2\n", .{});
+    try beside.set("m.c", @as(i64, 3));
+    try std.testing.expectEqualStrings("a: &x k\nm:\n  *x : 1\n  b: 2\n  c: 3\n", try emitToString(a, &beside));
+}
+
+test "a member added to a flow mapping is written in flow syntax" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    var multi = try Document.parse(a, "m: {\n  a: 1,\n  b: 2,\n}\n", .{});
+    try multi.set("m.c", @as(i64, 1));
+    try multi.set("m.x.y", "p, q");
+    try multi.setSegments(&.{ "m", "x,y" }, @as(i64, 7));
+    try std.testing.expectEqualStrings("m: {\n  a: 1,\n  b: 2, \"c\": 1, \"x\": {\"y\": \"p, q\"}, \"x,y\": 7,\n}\n", try emitToString(a, &multi));
+    try std.testing.expectEqualStrings("p, q", multi.getT([]const u8, "m.x.y").?);
+    try std.testing.expectEqual(@as(i64, 7), multi.getT(i64, "m.x,y").?);
+    var empty = try Document.parse(a, "m: {}\n", .{});
+    try empty.set("m.a", @as(i64, 1));
+    try std.testing.expectEqualStrings("m: {\"a\": 1}\n", try emitToString(a, &empty));
+    var pair = try Document.parse(a, "l: [a: 1]\n", .{});
+    try std.testing.expectError(error.InvalidValue, pair.set("l[0].b", @as(i64, 2)));
+}
+
+test "an empty value carrying only an anchor or tag takes the new value after them" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    const cases = [_]struct { src: []const u8, path: []const u8, out: []const u8 }{
+        .{ .src = "a: &x\nb: 2\n", .path = "a", .out = "a: &x 1\nb: 2\n" },
+        .{ .src = "a: !!str\nb: 2\n", .path = "a", .out = "a: !!str 1\nb: 2\n" },
+        .{ .src = "- &a\n- 2\n", .path = "[0]", .out = "- &a 1\n- 2\n" },
+        .{ .src = "? a\n: &x\nb: 2\n", .path = "a", .out = "? a\n: &x 1\nb: 2\n" },
+    };
+    for (cases) |c| {
+        var doc = try Document.parse(a, c.src, .{});
+        try doc.setLiteral(c.path, "1");
+        try std.testing.expectEqualStrings(c.out, try emitToString(a, &doc));
+    }
+}
+
+test "an explicit key with an anchor, a tag or a comment before it takes its `:` line at its `?`" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    for ([_][]const u8{ "? &k a\nc: 2\n", "? !!str a\nc: 2\n", "? # why?\n  a\nc: 2\n" }) |src| {
+        var doc = try Document.parse(a, src, .{});
+        try doc.set("a", @as(i64, 1));
+        try std.testing.expectEqual(@as(i64, 1), doc.getT(i64, "a").?);
+        try std.testing.expectEqual(@as(i64, 2), doc.getT(i64, "c").?);
+    }
+}
+
+test "a value set on an empty sequence entry lands after its own `-`" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    for ([_][]const u8{ "- \n- 2\n", "-\n- 2\n" }) |src| {
+        var doc = try Document.parse(a, src, .{});
+        try doc.set("[0]", @as(i64, 1));
+        try std.testing.expectEqualStrings("- 1\n- 2\n", try emitToString(a, &doc));
+    }
+    var last = try Document.parse(a, "- 1\n-\n", .{});
+    try last.set("[1]", @as(i64, 2));
+    try std.testing.expectEqualStrings("- 1\n- 2\n", try emitToString(a, &last));
+}
+
+test "an anchor or tag written before an implicit key belongs to the key" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    const cases = [_][]const u8{
+        "&a k: v\nm:\n  *a : 1\n",
+        "x: 1\n&a k: v\nm:\n  *a : 1\n",
+        "x:\n&a k: v\nm:\n  *a : 1\n",
+        "x: 1\n!!str &a k: v\nm:\n  *a : 1\n",
+        "- &a k: v\n  m:\n    *a : 1\n",
+    };
+    for (cases) |src| {
+        var doc = try Document.parse(a, src, .{});
+        const path = if (src[0] == '-') "[0].m.k" else "m.k";
+        try doc.set(path, @as(i64, 3));
+        const out = try emitToString(a, &doc);
+        std.testing.expect(std.mem.indexOf(u8, out, "*a : 3") != null) catch |e| {
+            std.debug.print("{s} ->\n{s}\n", .{ src, out });
+            return e;
+        };
+        std.testing.expectEqual(@as(?i64, 3), doc.getT(i64, path)) catch |e| {
+            std.debug.print("read back {s} at {s}:\n{s}\n", .{ src, path, out });
+            return e;
+        };
+    }
+    // A key that is "" is not the alias.
+    var empty_key = try Document.parse(a, "x: 1\n&a k: v\nm:\n  *a : 1\n", .{});
+    try empty_key.setSegments(&.{ "m", "" }, @as(i64, 9));
+    try std.testing.expectEqual(@as(i64, 1), empty_key.getT(i64, "m.k").?);
+    // A key-only alias member in a flow mapping takes ` : value`.
+    var flow = try Document.parse(a, "x: &a k\nm: {*a, b: 1}\n", .{});
+    try flow.set("m.k", @as(i64, 3));
+    try std.testing.expectEqualStrings("x: &a k\nm: {*a : 3, b: 1}\n", try emitToString(a, &flow));
+}
+
+test "replacing a block sequence that holds empty entries replaces all of it" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    const cases = [_]struct { src: []const u8, path: []const u8, want: []const u8 }{
+        .{ .src = "k3:\n  -\nk5: 1\n", .path = "k3", .want = "9" },
+        .{ .src = "k3:\n-\n", .path = "k3", .want = "9" },
+        .{ .src = "k3:\n  - \n", .path = "k3", .want = "9" },
+        .{ .src = "k3:\n  -\n  -\n", .path = "k3", .want = "9" },
+        .{ .src = "k3:\n  - -\n", .path = "k3", .want = "9" },
+        .{ .src = "k3: &a4\n  -\n", .path = "k3", .want = "9" },
+    };
+    for (cases) |c| {
+        var doc = try Document.parse(a, c.src, .{});
+        try doc.setLiteral(c.path, c.want);
+        std.testing.expectEqual(@as(?i64, 9), doc.getT(i64, c.path)) catch |e| {
+            std.debug.print("{s} ->\n{s}\n", .{ c.src, try emitToString(a, &doc) });
+            return e;
+        };
+    }
+    var nested = try Document.parse(a, "k3:\n  - -\n", .{});
+    try nested.setLiteral("k3[0]", "9");
+    try std.testing.expectEqual(@as(i64, 9), nested.getT(i64, "k3[0]").?);
+}
+
+test "an empty value with its own properties leaves the next key line's properties to that key" {
+    var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    const cases = [_]struct { src: []const u8, path: []const u8, out: []const u8 }{
+        .{ .src = "k1: &a\n!!str k3: v\n", .path = "k1", .out = "k1: &a 1\n!!str k3: v\n" },
+        .{ .src = "k1: &a\n&b k3: v\n", .path = "k1", .out = "k1: &a 1\n&b k3: v\n" },
+        .{ .src = "k1: !!str\n&b k3: v\n", .path = "k1", .out = "k1: !!str 1\n&b k3: v\n" },
+        .{ .src = "? k1\n: &a\n&b k3: v\n", .path = "k1", .out = "? k1\n: &a 1\n&b k3: v\n" },
+        .{ .src = "x:\n  k1: &a\n  !!str k3: v\n", .path = "x.k1", .out = "x:\n  k1: &a 1\n  !!str k3: v\n" },
+    };
+    for (cases) |c| {
+        var doc = try Document.parse(a, c.src, .{});
+        try doc.setLiteral(c.path, "1");
+        try std.testing.expectEqualStrings(c.out, try emitToString(a, &doc));
+    }
+    var aliased = try Document.parse(a, "k1: &a\n&b k3: v\nm:\n  *b : 1\n", .{});
+    try aliased.set("m.k3", @as(i64, 5));
+    try std.testing.expectEqualStrings("k1: &a\n&b k3: v\nm:\n  *b : 5\n", try emitToString(a, &aliased));
 }
