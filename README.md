@@ -557,7 +557,7 @@ mapping's keys; keys already present in the local mapping win. Set
 | `emitTyped(w, value, arena, options)` | Emit a typed value, honoring annotations and hooks. |
 | `cookScalarText(arena, src, event)` | Cook a scalar event to its presentation text. |
 | `tagOf(schema, plain)` | Name the type a schema's grammar gives a plain scalar. |
-| `isPlainSafe(s)` | Whether `s` can be written as a plain scalar and read back as this string by the readers `emit` accounts for. |
+| `isPlainSafe(s, context)` | Whether `s` can be written as a plain scalar - a value or an implicit key, in block or flow context - and read back as this string by the readers `emit` accounts for; a non-breaking release may only make it stricter. |
 
 #### Streaming (reader-backed, document-at-a-time)
 

@@ -53,10 +53,16 @@ pub const Tag = schema.Tag;
 /// that string under `schema`.
 pub const tagOf = schema.tagOf;
 
-/// True when `s` written as a plain scalar in block context reads back as
-/// this string under the core schema, the YAML 1.1 types, and the YAML 1.1
-/// readers in common use; false for bytes that are not UTF-8. `emit` writes
-/// a string plain exactly when this holds.
+/// Where a plain scalar sits for `isPlainSafe`: in a flow collection or
+/// not, and as an implicit key or not.
+pub const PlainContext = emitter.PlainContext;
+
+/// True when `s` written as a plain scalar where the context says reads
+/// back as this string under the core schema, the YAML 1.1 types, and the
+/// YAML 1.1 readers in common use; false for bytes that are not UTF-8. For a
+/// block value (`.{}`), `emit` writes a string plain exactly when this
+/// holds. A release that does not break may only make it return false for
+/// more strings.
 pub const isPlainSafe = emitter.isPlainSafe;
 
 /// Indentation-aware streaming tokenizer over block-context YAML. Emits a
