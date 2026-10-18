@@ -4,6 +4,19 @@ All notable changes to this project are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-10-19
+
+### Added
+
+- `isPlainSafe(s, context)` and `PlainContext`: whether `s` can be written
+  as a plain scalar - a value or an implicit key (at most 1024 characters),
+  in block or flow context - and read back as this string under the core
+  schema, the YAML 1.1 types, and the YAML 1.1 readers in common use (false
+  for bytes that are not UTF-8). For a block value `emit` writes a string
+  plain exactly when this holds, so a program writing YAML text itself can
+  decide the same way. A release that does not break may only make it
+  return false for more strings.
+
 ## [0.5.0] - 2026-10-18
 
 ### Breaking
@@ -278,7 +291,8 @@ document model, reader-backed streaming reader, and tooling.
   runnable examples (`basic`, `typed`, `stream`, `emit`, `spans`, `edit`,
   `event_stream`).
 
-[Unreleased]: https://github.com/sakakibara/yaml-zig/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/sakakibara/yaml-zig/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/sakakibara/yaml-zig/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/sakakibara/yaml-zig/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/sakakibara/yaml-zig/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/sakakibara/yaml-zig/compare/v0.2.0...v0.3.0
