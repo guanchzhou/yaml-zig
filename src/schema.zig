@@ -42,9 +42,9 @@ pub const Tag = enum { null, bool, int, float, timestamp, merge, value, str };
 pub fn tagOf(schema: Schema, plain: []const u8) Tag {
     return switch (schema) {
         .failsafe => .str,
-        .json => if (std.mem.eql(u8, plain, "null"))
+        .json => if (isWord(plain, "null"))
             .null
-        else if (std.mem.eql(u8, plain, "true") or std.mem.eql(u8, plain, "false"))
+        else if (isWord(plain, "true") or isWord(plain, "false"))
             .bool
         else if (isJsonIntGrammar(plain))
             .int
@@ -92,17 +92,17 @@ fn resolveCore(arena: std.mem.Allocator, plain: []const u8) std.mem.Allocator.Er
 /// tag:yaml.org,2002:null -- `~`, `null`/`Null`/`NULL`, or empty.
 fn coreNull(plain: []const u8) bool {
     return plain.len == 0 or
-        std.mem.eql(u8, plain, "~") or
-        std.mem.eql(u8, plain, "null") or
-        std.mem.eql(u8, plain, "Null") or
-        std.mem.eql(u8, plain, "NULL");
+        isWord(plain, "~") or
+        isWord(plain, "null") or
+        isWord(plain, "Null") or
+        isWord(plain, "NULL");
 }
 
 /// tag:yaml.org,2002:bool -- exactly true|True|TRUE|false|False|FALSE.
 /// 1.1-only spellings (yes/no/on/off) are deliberately NOT booleans.
 fn coreBool(plain: []const u8) ?bool {
-    if (std.mem.eql(u8, plain, "true") or std.mem.eql(u8, plain, "True") or std.mem.eql(u8, plain, "TRUE")) return true;
-    if (std.mem.eql(u8, plain, "false") or std.mem.eql(u8, plain, "False") or std.mem.eql(u8, plain, "FALSE")) return false;
+    if (isWord(plain, "true") or isWord(plain, "True") or isWord(plain, "TRUE")) return true;
+    if (isWord(plain, "false") or isWord(plain, "False") or isWord(plain, "FALSE")) return false;
     return null;
 }
 
@@ -181,11 +181,11 @@ fn coreInfNan(plain: []const u8) ?f64 {
         neg = s[0] == '-';
         s = s[1..];
     }
-    if (std.mem.eql(u8, s, ".inf") or std.mem.eql(u8, s, ".Inf") or std.mem.eql(u8, s, ".INF")) {
+    if (isWord(s, ".inf") or isWord(s, ".Inf") or isWord(s, ".INF")) {
         return if (neg) -std.math.inf(f64) else std.math.inf(f64);
     }
     // .nan takes no sign in the schema; only the unsigned spelling resolves.
-    if (!neg and (std.mem.eql(u8, plain, ".nan") or std.mem.eql(u8, plain, ".NaN") or std.mem.eql(u8, plain, ".NAN"))) {
+    if (!neg and (isWord(plain, ".nan") or isWord(plain, ".NaN") or isWord(plain, ".NAN"))) {
         return std.math.nan(f64);
     }
     return null;
@@ -225,8 +225,8 @@ fn yaml11Tag(plain: []const u8) Tag {
     if (isYaml11IntGrammar(plain)) return .int;
     if (isYaml11FloatGrammar(plain)) return .float;
     if (isYaml11Timestamp(plain)) return .timestamp;
-    if (std.mem.eql(u8, plain, "<<")) return .merge;
-    if (std.mem.eql(u8, plain, "=")) return .value;
+    if (isWord(plain, "<<")) return .merge;
+    if (isWord(plain, "=")) return .value;
     return .str;
 }
 
@@ -250,8 +250,8 @@ fn yaml11Null(plain: []const u8) bool {
 fn yaml11Bool(plain: []const u8) ?bool {
     const yes = [_][]const u8{ "y", "Y", "yes", "Yes", "YES", "true", "True", "TRUE", "on", "On", "ON" };
     const no = [_][]const u8{ "n", "N", "no", "No", "NO", "false", "False", "FALSE", "off", "Off", "OFF" };
-    for (yes) |w| if (std.mem.eql(u8, plain, w)) return true;
-    for (no) |w| if (std.mem.eql(u8, plain, w)) return false;
+    inline for (yes) |w| if (isWord(plain, w)) return true;
+    inline for (no) |w| if (isWord(plain, w)) return false;
     return null;
 }
 
@@ -432,9 +432,9 @@ fn withoutUnderscores(arena: std.mem.Allocator, s: []const u8) std.mem.Allocator
 // JSON schema (the JSON data model, strict grammar)
 
 fn resolveJson(arena: std.mem.Allocator, plain: []const u8) std.mem.Allocator.Error!Value {
-    if (std.mem.eql(u8, plain, "null")) return .null;
-    if (std.mem.eql(u8, plain, "true")) return .{ .bool = true };
-    if (std.mem.eql(u8, plain, "false")) return .{ .bool = false };
+    if (isWord(plain, "null")) return .null;
+    if (isWord(plain, "true")) return .{ .bool = true };
+    if (isWord(plain, "false")) return .{ .bool = false };
     if (jsonInt(plain)) |i| return .{ .int = i };
     if (jsonFloat(plain)) |f| return .{ .float = f };
     return asString(arena, plain);
@@ -645,4 +645,12 @@ test "tagOf names the type each schema's grammar gives a plain scalar" {
             return e;
         };
     }
+}
+
+/// Whether `plain` is exactly `word`, compared inline: it runs for every
+/// plain scalar resolved.
+fn isWord(plain: []const u8, comptime word: []const u8) bool {
+    if (plain.len != word.len) return false;
+    inline for (word, 0..) |c, i| if (plain[i] != c) return false;
+    return true;
 }
