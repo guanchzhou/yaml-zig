@@ -541,8 +541,8 @@ test "core schema resolves nulls bools ints floats" {
 }
 
 test "core gives a whole number beyond i128 as the float nearest it, in every base" {
-    try expectResolve(.core, "0x" ++ "f" ** 33, .{ .float = 0x1p132 });
-    try expectResolve(.core, "0o" ++ "7" ** 50, .{ .float = 0x1p150 });
+    try expectResolve(.core, "0x" ++ &@as([33]u8, @splat('f')), .{ .float = 0x1p132 });
+    try expectResolve(.core, "0o" ++ &@as([50]u8, @splat('7')), .{ .float = 0x1p150 });
     try expectResolve(.core, "-170141183460469231731687303715884105728", .{ .int = std.math.minInt(i128) });
     try expectResolve(.core, "170141183460469231731687303715884105728", .{ .float = 0x1p127 });
 }
@@ -595,8 +595,8 @@ test "yaml11 resolves its wider booleans, integers in every base, floats and nul
     try expectResolve(.yaml11, "1.0_0", .{ .float = 1.0 });
     try expectResolve(.yaml11, "-170141183460469231731687303715884105728", .{ .int = std.math.minInt(i128) });
     try expectResolve(.yaml11, "-0x80000000000000000000000000000000", .{ .int = std.math.minInt(i128) });
-    try expectResolve(.yaml11, "0" ++ "7" ** 50, .{ .float = 0x1p150 - 1 });
-    try expectResolve(.yaml11, "0b" ++ "1" ** 130, .{ .float = 0x1p130 });
+    try expectResolve(.yaml11, "0" ++ &@as([50]u8, @splat('7')), .{ .float = 0x1p150 - 1 });
+    try expectResolve(.yaml11, "0b" ++ &@as([130]u8, @splat('1')), .{ .float = 0x1p130 });
     try expectResolve(.yaml11, ".5", .{ .float = 0.5 });
     try expectResolve(.yaml11, "190:20:30.15", .{ .float = 685230.15 });
     try expectResolve(.yaml11, "-.Inf", .{ .float = -std.math.inf(f64) });

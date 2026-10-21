@@ -627,7 +627,7 @@ pub const Composer = struct {
     };
 
     fn hashValue(h: *std.hash.Wyhash, v: Value) void {
-        h.update(&[_]u8{@intFromEnum(std.meta.activeTag(v))});
+        h.update(&[_]u8{@backingInt(std.meta.activeTag(v))});
         switch (v) {
             .null => {},
             .bool => |b| h.update(&[_]u8{@intFromBool(b)}),
@@ -2066,7 +2066,7 @@ test "a whole number of any length resolves in time linear in its length" {
     const elapsed_ns = start.durationTo(std.Io.Timestamp.now(std.testing.io, .awake)).nanoseconds;
     try std.testing.expect(elapsed_ns < 5 * std.time.ns_per_s);
     // Below the range limit the exact value still comes through.
-    try std.testing.expectEqual(@as(f64, 0x1p1000), (try parse(a, "a: 0b1" ++ "0" ** 1000 ++ "\n", .{ .schema = .yaml11 })).getT(f64, "a").?);
+    try std.testing.expectEqual(@as(f64, 0x1p1000), (try parse(a, "a: 0b1" ++ &@as([1000]u8, @splat('0')) ++ "\n", .{ .schema = .yaml11 })).getT(f64, "a").?);
 }
 
 test "merge of a large map is linear, not quadratic" {

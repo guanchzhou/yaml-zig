@@ -2563,7 +2563,7 @@ test "flow-as-key candidate buffering terminates within the bound" {
     const cap = 4096;
     try drainBoundedScan("[a, b]: value\n", cap);
     try drainBoundedScan("{a: 1}: value\n", cap);
-    try drainBoundedScan("[" ++ ("x," ** 700) ++ "x]: v\n", cap);
+    try drainBoundedScan("[" ++ &@as([1400]u8, @bitCast(@as([700][2]u8, @splat("x,".*)))) ++ "x]: v\n", cap);
     try drainBoundedScan("[a, b\n", cap);
     try drainBoundedScan("[a, b", cap);
 }

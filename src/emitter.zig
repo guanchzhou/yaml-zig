@@ -118,7 +118,7 @@ fn buildValue(comptime T: type, value: T, arena: std.mem.Allocator) (std.mem.All
     if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toYaml"))) {
         comptime {
             const fn_info = @typeInfo(@TypeOf(T.toYaml)).@"fn";
-            if (fn_info.params.len != 2) {
+            if (fn_info.param_types.len != 2) {
                 @compileError(@typeName(T) ++ ".toYaml must take exactly 2 params: (Self, Allocator)");
             }
         }
@@ -137,7 +137,7 @@ fn buildValue(comptime T: type, value: T, arena: std.mem.Allocator) (std.mem.All
         .float => .{ .float = @floatCast(value) },
         .pointer => |p| blk: {
             if (p.size != .slice) @compileError("yaml emitTyped: only slice pointers supported, got " ++ @typeName(T));
-            if (p.child == u8 and p.is_const) break :blk .{ .string = value };
+            if (p.child == u8 and p.attrs.@"const") break :blk .{ .string = value };
             break :blk buildSeq(p.child, value, arena);
         },
         .array => |a| buildSeq(a.child, &value, arena),
@@ -165,23 +165,23 @@ fn buildSeq(comptime Child: type, items: []const Child, arena: std.mem.Allocator
 /// fields and tagged-union payloads inline into the parent mapping.
 /// Skipped fields are dropped; null optionals are omitted entirely.
 fn buildStructFields(comptime T: type, value: T, arena: std.mem.Allocator, entries: *std.ArrayList(Entry)) (std.mem.Allocator.Error || error{UnrepresentableInt})!void {
-    inline for (@typeInfo(T).@"struct".fields) |field| {
-        if (comptime decode_mod.isSkipped(T, field.name)) continue;
-        const fv = @field(value, field.name);
-        if (comptime decode_mod.isFlattened(T, field.name)) {
-            comptime decode_mod.validateAnnotations(field.type);
-            try buildStructFields(field.type, fv, arena, entries);
-        } else if (comptime @typeInfo(field.type) == .optional) {
+    inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |name, Field| {
+        if (comptime decode_mod.isSkipped(T, name)) continue;
+        const fv = @field(value, name);
+        if (comptime decode_mod.isFlattened(T, name)) {
+            comptime decode_mod.validateAnnotations(Field);
+            try buildStructFields(Field, fv, arena, entries);
+        } else if (comptime @typeInfo(Field) == .optional) {
             // Null optionals are omitted; decode maps the absent key back
             // to null, so the round-trip is lossless.
             if (fv) |inner| {
-                const key = comptime decode_mod.renamedKey(T, field.name);
-                const v = try buildValue(@typeInfo(field.type).optional.child, inner, arena);
+                const key = comptime decode_mod.renamedKey(T, name);
+                const v = try buildValue(@typeInfo(Field).optional.child, inner, arena);
                 try entries.append(arena, .{ .key = .{ .string = key }, .value = v });
             }
         } else {
-            const key = comptime decode_mod.renamedKey(T, field.name);
-            const v = try buildValue(field.type, fv, arena);
+            const key = comptime decode_mod.renamedKey(T, name);
+            const v = try buildValue(Field, fv, arena);
             try entries.append(arena, .{ .key = .{ .string = key }, .value = v });
         }
     }
@@ -191,14 +191,14 @@ fn buildTaggedUnion(comptime T: type, value: T, arena: std.mem.Allocator) (std.m
     comptime decode_mod.validateAnnotations(T);
     const active = std.meta.activeTag(value);
     var entries: std.ArrayList(Entry) = .empty;
-    inline for (@typeInfo(T).@"union".fields) |union_field| {
-        if (active == @field(std.meta.Tag(T), union_field.name)) {
+    inline for (@typeInfo(T).@"union".field_names, @typeInfo(T).@"union".field_types) |name, Field| {
+        if (active == @field(std.meta.Tag(T), name)) {
             try entries.append(arena, .{
                 .key = .{ .string = T.yaml_tag },
-                .value = .{ .string = comptime decode_mod.renamedKey(T, union_field.name) },
+                .value = .{ .string = comptime decode_mod.renamedKey(T, name) },
             });
-            if (union_field.type != void) {
-                try buildStructFields(union_field.type, @field(value, union_field.name), arena, &entries);
+            if (Field != void) {
+                try buildStructFields(Field, @field(value, name), arena, &entries);
             }
         }
     }
@@ -935,7 +935,7 @@ test "emit writes a key past the implicit key limit as an explicit key" {
     var ar = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer ar.deinit();
     const a = ar.allocator();
-    const long = "k" ** 1100;
+    const long = &@as([1100]u8, @splat('k'));
     const entries = try a.dupe(Entry, &.{
         .{ .key = .{ .string = long }, .value = .{ .int = 1 } },
         .{ .key = .{ .string = "short" }, .value = .{ .int = 2 } },
@@ -946,7 +946,7 @@ test "emit writes a key past the implicit key limit as an explicit key" {
     const back = try parse(a, aw.written(), .{});
     try std.testing.expectEqual(@as(i64, 1), back.getT(i64, long).?);
     var fits: std.Io.Writer.Allocating = .init(a);
-    try emit(&fits.writer, .{ .map = try a.dupe(Entry, &.{.{ .key = .{ .string = "k" ** 1024 }, .value = .{ .int = 1 } }}) }, .{});
+    try emit(&fits.writer, .{ .map = try a.dupe(Entry, &.{.{ .key = .{ .string = &@as([1024]u8, @splat('k')) }, .value = .{ .int = 1 } }}) }, .{});
     try std.testing.expect(fits.written()[0] == 'k');
 }
 
@@ -961,8 +961,8 @@ test "flow style refuses bytes that are not UTF-8, and writes a long or escaped 
         try std.testing.expectError(error.InvalidUtf8, emit(&aw.writer, m, .{}));
     }
     // 600 quotes are 1200 characters once escaped.
-    const quotes = "\"" ** 600;
-    const long = "k" ** 2000;
+    const quotes = &@as([600]u8, @splat('"'));
+    const long = &@as([2000]u8, @splat('k'));
     for ([_]bool{ false, true }) |sorted| {
         const inner: Value = .{ .map = try a.dupe(Entry, &.{.{ .key = .{ .string = long }, .value = .{ .int = 1 } }}) };
         const m: Value = .{ .map = try a.dupe(Entry, &.{
@@ -971,7 +971,7 @@ test "flow style refuses bytes that are not UTF-8, and writes a long or escaped 
         }) };
         var aw: std.Io.Writer.Allocating = .init(a);
         try emit(&aw.writer, m, .{ .sort_keys = sorted });
-        try std.testing.expect(std.mem.indexOf(u8, aw.written(), "? \"" ++ "k" ** 10) != null);
+        try std.testing.expect(std.mem.indexOf(u8, aw.written(), "? \"" ++ &@as([10]u8, @splat('k'))) != null);
         try std.testing.expect(std.mem.indexOf(u8, aw.written(), "? \"\\\"\\\"") != null);
         const back = try parse(a, aw.written(), .{});
         try std.testing.expectEqual(@as(usize, 2), back.map.len);
@@ -1526,9 +1526,9 @@ test "isPlainSafe in a flow collection also refuses flow indicators, `?` and `:`
 }
 
 test "isPlainSafe for an implicit key also limits its length in characters" {
-    const at_limit = "k" ** max_implicit_key_chars;
+    const at_limit = &@as([max_implicit_key_chars]u8, @splat('k'));
     try std.testing.expect(isPlainSafe(at_limit, .{ .key = true }));
     try std.testing.expect(!isPlainSafe(at_limit ++ "k", .{ .key = true }));
     try std.testing.expect(isPlainSafe(at_limit ++ "k", .{}));
-    try std.testing.expect(isPlainSafe("\u{e9}" ** max_implicit_key_chars, .{ .key = true }));
+    try std.testing.expect(isPlainSafe(&@as([2 * max_implicit_key_chars]u8, @bitCast(@as([max_implicit_key_chars][2]u8, @splat("\u{e9}".*)))), .{ .key = true }));
 }

@@ -4,6 +4,13 @@ All notable changes to this project are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking
+
+- Requires Zig 0.17.0 (`minimum_zig_version`). On Zig 0.16, stay on 0.5.x:
+  `zig fetch --save git+https://github.com/sakakibara/yaml-zig#v0.5.1`.
+
 ## [0.5.1] - 2026-10-19
 
 ### Added
