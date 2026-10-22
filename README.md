@@ -679,14 +679,14 @@ zig build bench
 The harness reports min/p50/p99/max latency and throughput across 100 samples
 with explicit warmup. See `bench/main.zig`.
 
-On an Apple M1 Max (aarch64-macos), Zig 0.16.0, ReleaseFast -- p50
+On an Apple M1 Max (aarch64-macos), Zig 0.17.0, ReleaseFast -- p50
 latency, median of ten runs, cross-run spread below 8% per cell:
 
 | Benchmark | small (970 B) | medium (22 KB) | large (291 KB) |
 | --- | --- | --- | --- |
-| parse | 12.4 us, 75 MB/s | -- | 3.68 ms, 77 MB/s |
-| parseStream | 12.2 us, 76 MB/s | 222 us, 98 MB/s | 3.69 ms, 77 MB/s |
-| emit | 2.88 us, 322 MB/s | 54.6 us, 424 MB/s | 1.03 ms, 298 MB/s |
+| parse | 13.8 us, 67 MB/s | -- | 4.24 ms, 67 MB/s |
+| parseStream | 13.8 us, 67 MB/s | 260 us, 83 MB/s | 4.24 ms, 67 MB/s |
+| emit | 7.71 us, 121 MB/s | 161 us, 145 MB/s | 2.55 ms, 122 MB/s |
 
 (`parse` requires a single document, so the multi-document medium fixture is
 measured only under `parseStream`. Emit throughput is against the bytes
