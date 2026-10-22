@@ -331,7 +331,7 @@ pub const Composer = struct {
                         top.pending_key_is_merge = self.options.merge_keys and
                             ev.scalar_style == .plain and
                             ev.tag == null and
-                            std.mem.eql(u8, ev.value, "<<");
+                            schema.isWord(ev.value, "<<");
                     }
                 }
                 return v;

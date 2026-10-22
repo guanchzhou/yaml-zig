@@ -37,6 +37,7 @@ const Value = value_mod.Value;
 const Entry = value_mod.Entry;
 const composer = @import("composer.zig");
 const lev = @import("levenshtein.zig");
+const isWord = @import("schema.zig").isWord;
 
 pub const DecodeError = error{
     TypeMismatch,
@@ -396,7 +397,7 @@ fn decodeStruct(comptime T: type, comptime s: std.lang.Type.Struct, arena: Alloc
             if (entry.key != .string) continue;
             const key = entry.key.string;
             inline for (comptime expectedKeys(T)) |expected| {
-                if (std.mem.eql(u8, key, expected)) continue :outer;
+                if (isWord(key, expected)) continue :outer;
             }
             // Unknown key. Try a suggestion.
             const suggestion = lev.closestMatch(key, comptime expectedKeys(T), lev.suggestionThreshold(key.len));
@@ -1354,14 +1355,14 @@ fn streamStruct(comptime T: type, p: *parser_mod.Parser, cook: *composer.Compose
             // A merge key rewrites the mapping from retained values; only
             // the tree path can do that. Detection mirrors the composer:
             // plain, untagged, raw content `<<`, with merge_keys on.
-            if (options.merge_keys and kev.scalar_style == .plain and kev.tag == null and std.mem.eql(u8, kev.value, "<<"))
+            if (options.merge_keys and kev.scalar_style == .plain and kev.tag == null and isWord(kev.value, "<<"))
                 return error.YamlParseError;
             const kv = try cook.composeScalar(kev);
             const vev = (try p.next()) orelse return error.YamlParseError;
             if (kv == .string) {
                 var matched = false;
                 inline for (eff, 0..) |f, idx| {
-                    if (!matched and std.mem.eql(u8, kv.string, f.key)) {
+                    if (!matched and isWord(kv.string, f.key)) {
                         // A duplicate key re-decodes and overwrites: last
                         // wins, matching mapGet's backwards scan.
                         pathPtr(T, f.path, &out).* = try streamValue(f.Type, p, cook, vev, depth + 1, options);
@@ -1432,7 +1433,7 @@ fn skipNode(p: *parser_mod.Parser, cook: *composer.Composer, ev: Event, depth: u
                         // decoded mapping does.
                         if (is_mapping and key_position and child.kind == .scalar and
                             options.merge_keys and child.scalar_style == .plain and
-                            child.tag == null and std.mem.eql(u8, child.value, "<<"))
+                            child.tag == null and isWord(child.value, "<<"))
                             return error.YamlParseError;
                         try skipNode(p, cook, child, depth + 1, options);
                         key_position = !key_position;

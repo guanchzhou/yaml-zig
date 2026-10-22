@@ -647,9 +647,10 @@ test "tagOf names the type each schema's grammar gives a plain scalar" {
     }
 }
 
-/// Whether `plain` is exactly `word`, compared inline: it runs for every
-/// plain scalar resolved.
-fn isWord(plain: []const u8, comptime word: []const u8) bool {
+/// Whether `plain` is exactly `word`, compared inline: it runs for each
+/// plain scalar resolved and each mapping key checked against a field
+/// name or the merge key.
+pub fn isWord(plain: []const u8, comptime word: []const u8) bool {
     if (plain.len != word.len) return false;
     inline for (word, 0..) |c, i| if (plain[i] != c) return false;
     return true;
