@@ -6,10 +6,14 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-22
+
 ### Breaking
 
 - Requires Zig 0.17.0 (`minimum_zig_version`). On Zig 0.16, stay on 0.5.x:
   `zig fetch --save git+https://github.com/sakakibara/yaml-zig#v0.5.1`.
+  0.5.x takes fixes on the `zig-0.16` branch; the README's Compatibility
+  section gives the dates.
 
 ## [0.5.1] - 2026-10-19
 
@@ -298,7 +302,8 @@ document model, reader-backed streaming reader, and tooling.
   runnable examples (`basic`, `typed`, `stream`, `emit`, `spans`, `edit`,
   `event_stream`).
 
-[Unreleased]: https://github.com/sakakibara/yaml-zig/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/sakakibara/yaml-zig/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/sakakibara/yaml-zig/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/sakakibara/yaml-zig/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/sakakibara/yaml-zig/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/sakakibara/yaml-zig/compare/v0.3.0...v0.4.0

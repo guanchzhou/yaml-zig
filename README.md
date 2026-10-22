@@ -82,9 +82,21 @@ exe.root_module.addImport("yaml", yaml.module("yaml"));
 
 ## Compatibility
 
-- **Zig:** 0.17 (`minimum_zig_version = 0.17.0`). For Zig 0.16, use 0.5.1
-  (`zig fetch --save git+https://github.com/sakakibara/yaml-zig#v0.5.1`);
-  once 0.6.0 is released, 0.5.x gets fixes on a `zig-0.16` branch.
+- **Zig:** 0.17 (`minimum_zig_version = 0.17.0`).
+- **Zig 0.16:** 0.5.x, on the `zig-0.16` branch from 0.5.1. It takes
+  non-breaking fixes that port without redesign through 2027-04-22 (through
+  2027-01-22 at the earliest if a branch for a newer Zig opens sooner), and
+  security and data-loss fixes through 2027-10-22. A fix that does not
+  port is listed here. Either date moves earlier only with 90 days' notice
+  in this section.
+- **Pull requests:** against `main`; a fix that applies only to Zig 0.16,
+  against `zig-0.16`.
+- **Pins:**
+
+  | Using Zig | Pin |
+  | --- | --- |
+  | 0.16 | `v0.5.1` (`zig fetch --save git+https://github.com/sakakibara/yaml-zig#v0.5.1`) |
+
 - **Versioning:** semantic versioning. Before 1.0, a minor release (0.y.0)
   may break and a patch (0.y.z) never does. Breaking changes are listed
   under "Breaking" in the [CHANGELOG](CHANGELOG.md), and their commits are
