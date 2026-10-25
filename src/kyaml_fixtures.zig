@@ -1,5 +1,6 @@
-//! Byte-for-byte check of tests/kyaml against sigs.k8s.io/yaml/kyaml v1.6.0.
-//! The .kyaml and .compact.kyaml files are produced by tools/kyaml-golden.
+//! Byte-compare of tests/kyaml. The .kyaml files are the encoder's output
+//! for these inputs, except specials.kyaml: bare `nan` and `inf` keys stay
+//! plain here. Every file is also parsed back and compared to the input value.
 
 const std = @import("std");
 const testing = std.testing;
@@ -7,7 +8,7 @@ const Io = std.Io;
 const yaml = @import("yaml.zig");
 const opts = @import("kyaml_fixture_options");
 
-test "kyaml fixtures match v1.6.0 byte for byte and round-trip" {
+test "kyaml fixtures match the checked-in output and round-trip" {
     const io = testing.io;
     var dir = try Io.Dir.openDirAbsolute(io, opts.fixtures_path, .{ .iterate = true });
     defer dir.close(io);

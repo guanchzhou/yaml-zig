@@ -1,7 +1,10 @@
-// Writes tests/kyaml/*.kyaml and *.compact.kyaml from the *.yaml inputs
-// using sigs.k8s.io/yaml/kyaml v1.6.0. Run from the repo root:
+// Writes tests/kyaml/*.kyaml and *.compact.kyaml by running
+// sigs.k8s.io/yaml/kyaml v1.6.0 on the *.yaml inputs. Run from the repo root:
 //
 //	go run tools/kyaml-golden/main.go
+//
+// specials.yaml's nan and inf keys stay plain in this library. After a
+// regenerate, unquote those two keys in both specials output files.
 package main
 
 import (

@@ -255,9 +255,9 @@ the payload's fields inline, so the output decodes back via `parseInto`.
 
 ### Emit (KYAML)
 
-KYAML is a strict subset of YAML used by Kubernetes (`kubectl get -o kyaml`).
-`emitKyaml`, `emitKyamlStream`, and `emitKyamlTyped` write it. The block
-emitter is unchanged.
+KYAML is the flow-style subset from KEP-5295. `emitKyaml`,
+`emitKyamlStream`, and `emitKyamlTyped` write it. The block emitter is
+unchanged.
 
 ```zig
 try yaml.emitKyaml(&aw.writer, v, .{});
@@ -265,19 +265,27 @@ try yaml.emitKyaml(&aw.writer, v, .{ .compact = true });
 ```
 
 Every document starts with `---`. Mappings are `{}`, lists are `[]`, and a
-comma follows every entry. A list whose items are only mappings or lists
-keeps those brackets together on one line. `compact` puts the document on
-one line, separates entries with `, `, and drops the trailing comma.
-Strings are double-quoted. A key is quoted only when a YAML reader could
-take it for a boolean, number, null, timestamp, or sexagesimal value
-(`yes`, `0123`, `2006-1-2`). Numbers, booleans, and null use the same
-spelling as `emit` (`null`, `true`, `1.0`, `.nan`). A list or mapping used
-as a key returns `error.UnrepresentableScalar`. Comments are not kept.
-Bytes that are not UTF-8 are written as `\xNN`.
+comma follows every entry unless the closing bracket sits on that entry's
+line. A list whose items are only mappings or lists keeps those brackets
+together. `compact` puts the document on one line, separates entries with
+`, `, and does not fold strings. Strings are double-quoted. A multi-line
+string is a flow fold: a trailing `\` drops the line break, `\n` keeps a
+newline, and `\` comes before a space only when that space is written as
+itself. A key is plain only when `isPlainSafe` says a flow implicit key
+reads back as that string, so `yes`, `0x_`, `0b_`, and `0123` are quoted.
+A key longer than 1024 code points, or a list or mapping used as a key,
+returns `error.UnrepresentableScalar`. Numbers, booleans, and null use
+`emit`'s spelling (`null`, `true`, `1.0`, `.nan`); as keys they are text,
+so they read back as strings. Bytes that are not UTF-8 return
+`error.InvalidUtf8`.
 
-The layout matches `sigs.k8s.io/yaml/kyaml` v1.6.0. `tests/kyaml/` holds
-inputs and the encoder's output; `go run tools/kyaml-golden/main.go`
-regenerates the output files.
+`Value` has already expanded aliases and merge keys, and it does not carry
+tags or comments, so none of those are written. `tests/kyaml/` holds inputs
+and checked output. `go run tools/kyaml-golden/main.go` regenerates that
+output from the v1.6.0 encoder; bare `nan` and `inf` keys then need to be
+unquoted, because this library only treats `.nan` and `.inf` as floats.
+The folded `\` rule, invalid UTF-8, keys over 1024 code points, and `0x_`
+/ `0b_` quoting also differ from that encoder.
 
 ### Document model (lossless editing)
 
